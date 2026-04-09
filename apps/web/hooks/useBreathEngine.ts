@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { getFaceLandmarker } from "../lib/mediapipe";
-import { loadYAMNet, getBreathingConfidence, downsampleAudio } from "../lib/yamnet";
 import type { FaceLandmarkerResult } from "@mediapipe/tasks-vision";
 
 /** Full in–out cycles required to complete the breath step UI (~2–3 deep breaths) */
@@ -21,7 +20,7 @@ export interface BreathStats {
   breathPhase: BreathPhase;
   /** 0–1 progress through the current phase */
   phaseProgress: number;
-  /** YAMNet (or fallback) detected breathing sound */
+  /** Real-time: is the current audio loud enough to be breathing? */
   breathingDetected: boolean;
 }
 
@@ -29,6 +28,28 @@ function variance(arr: number[]): number {
   if (arr.length < 4) return 0;
   const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
   return arr.reduce((s, x) => s + (x - mean) ** 2, 0) / arr.length;
+}
+
+/**
+ * Checks whether a phase had real breathing based on volume statistics.
+ * Requires: high average volume, a clear peak, AND volume variation
+ * (breathing has peaks/valleys — ambient noise is flat).
+ */
+function isPhaseValid(volumes: number[], noiseFloor: number): boolean {
+  if (volumes.length < 20) return false;
+
+  const avg = volumes.reduce((a, b) => a + b, 0) / volumes.length;
+  const peak = Math.max(...volumes);
+  const stdDev = Math.sqrt(
+    volumes.reduce((s, v) => s + (v - avg) ** 2, 0) / volumes.length
+  );
+
+  // Adaptive thresholds — scale with noise floor but enforce hard minimums
+  const minAvg = Math.max(0.18, noiseFloor * 2.0);
+  const minPeak = Math.max(0.35, noiseFloor * 3.0);
+  const minStdDev = 0.04; // breathing has volume variation; ambient is flat
+
+  return avg > minAvg && peak > minPeak && stdDev > minStdDev;
 }
 
 export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | null>) {
@@ -57,24 +78,13 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
   // Guided breathing phase tracking
   const phaseRef = useRef<BreathPhase>("idle");
   const phaseStartMsRef = useRef(0);
-  const inhaleAudioFramesRef = useRef(0);
-  const exhaleAudioFramesRef = useRef(0);
-  const inhalePeakRef = useRef(0);
-  const exhalePeakRef = useRef(0);
+  const inhaleVolumesRef = useRef<number[]>([]);
+  const exhaleVolumesRef = useRef<number[]>([]);
 
   // Noise floor calibration — measured during first idle phase
   const noiseFloorRef = useRef(0);
   const noiseFloorSamplesRef = useRef<number[]>([]);
   const noiseFloorCalibratedRef = useRef(false);
-
-  // YAMNet audio classification
-  const breathingConfidenceRef = useRef(0);
-  const yamnetReadyRef = useRef(false);
-  const yamnetBufferRef = useRef<Float32Array[]>([]);
-  const yamnetSamplesRef = useRef(0);
-  const yamnetInferringRef = useRef(false);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const nativeRateRef = useRef(44100);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -84,50 +94,13 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     try {
       const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
       const source = audioCtx.createMediaStreamSource(stream);
-
-      // AnalyserNode — RMS volume for the visual indicator
       const analyser = audioCtx.createAnalyser();
       analyser.fftSize = 512;
       analyser.smoothingTimeConstant = 0.35;
       source.connect(analyser);
 
-      // ScriptProcessorNode — capture raw PCM for YAMNet
-      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
-      source.connect(processor);
-      const silentOutput = audioCtx.createGain();
-      silentOutput.gain.value = 0;
-      processor.connect(silentOutput);
-      silentOutput.connect(audioCtx.destination);
-
-      nativeRateRef.current = audioCtx.sampleRate;
-      const samplesNeeded = Math.ceil(audioCtx.sampleRate * 0.975); // ~960 ms
-
-      processor.onaudioprocess = (e: AudioProcessingEvent) => {
-        const channelData = e.inputBuffer.getChannelData(0);
-        yamnetBufferRef.current.push(new Float32Array(channelData));
-        yamnetSamplesRef.current += channelData.length;
-
-        if (yamnetSamplesRef.current >= samplesNeeded && !yamnetInferringRef.current) {
-          yamnetInferringRef.current = true;
-
-          // Concatenate accumulated chunks
-          const totalLen = yamnetBufferRef.current.reduce((a, b) => a + b.length, 0);
-          const full = new Float32Array(totalLen);
-          let off = 0;
-          for (const buf of yamnetBufferRef.current) { full.set(buf, off); off += buf.length; }
-          yamnetBufferRef.current = [];
-          yamnetSamplesRef.current = 0;
-
-          const downsampled = downsampleAudio(full, nativeRateRef.current, 16000);
-          getBreathingConfidence(downsampled)
-            .then((c) => { breathingConfidenceRef.current = c; yamnetInferringRef.current = false; })
-            .catch(() => { yamnetInferringRef.current = false; });
-        }
-      };
-
       audioContextRef.current = audioCtx;
       analyserRef.current = analyser;
-      processorRef.current = processor;
       dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
     } catch (e) {
       console.error("Audio Context Init Failed:", e);
@@ -200,33 +173,26 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
         syncCorrelationScore = Math.max(0, Math.min(100, 100 - avgDiff * 135));
       }
 
-      // Both modalities must be present
       setIsBreathing(mouthMotion && audibleBreath);
     } else {
       setIsBreathing(false);
     }
 
-    // Require BOTH mouth and audio — single modality alone fails
     let breathScore: number;
     if (mouthOnlyScore > 0 && audioOnlyScore > 0) {
-      // Both present: use sync if strong, otherwise weighted average of both
       breathScore = Math.round(
         Math.max(syncCorrelationScore, (mouthOnlyScore * 0.5 + audioOnlyScore * 0.5))
       );
     } else {
-      // Missing one modality — cap score low so it can't pass
       breathScore = Math.round(Math.max(mouthOnlyScore, audioOnlyScore) * 0.3);
     }
 
     // --- Guided breath phase detection ---
-    // Timed phases prompt inhale → exhale. Audio must be CLEARLY
-    // above ambient noise in BOTH phases for a cycle to count.
+    // Each phase collects all volume readings. At phase end, statistical
+    // analysis determines if real breathing occurred (avg, peak, stddev).
     const INHALE_MS = 3500;
     const EXHALE_MS = 3500;
     const PAUSE_MS = 2000;
-    const ABSOLUTE_MIN_VOLUME = 0.30;   // hard floor — nothing below this counts
-    const MIN_PHASE_AUDIO = 35;         // ~0.6s at 60fps, ~1.2s at 30fps
-    const MIN_PHASE_PEAK = 0.45;        // peak must hit this during the phase
 
     const now = performance.now();
     if (phaseStartMsRef.current === 0) phaseStartMsRef.current = now;
@@ -237,41 +203,33 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       noiseFloorSamplesRef.current.push(currentVolume);
       if (noiseFloorSamplesRef.current.length >= 40) {
         const sorted = [...noiseFloorSamplesRef.current].sort((a, b) => a - b);
-        noiseFloorRef.current = sorted[Math.floor(sorted.length * 0.9)]!; // 90th percentile
+        noiseFloorRef.current = sorted[Math.floor(sorted.length * 0.9)]!;
         noiseFloorCalibratedRef.current = true;
       }
     }
 
-    // Dynamic threshold: at least 2.5x noise floor, but never below ABSOLUTE_MIN_VOLUME
-    const dynamicThreshold = Math.max(ABSOLUTE_MIN_VOLUME, noiseFloorRef.current * 2.5);
-
-    // YAMNet ML detection if available, otherwise dynamic volume threshold
-    const isBreathDetected = yamnetReadyRef.current
-      ? breathingConfidenceRef.current > 0.4
-      : currentVolume > dynamicThreshold;
+    // Real-time indicator for UI (adaptive to noise floor)
+    const liveThreshold = Math.max(0.25, noiseFloorRef.current * 2.5);
+    const isBreathDetected = currentVolume > liveThreshold;
 
     if (phaseRef.current === "idle" && phaseElapsed >= PAUSE_MS) {
       phaseRef.current = "inhale";
       phaseStartMsRef.current = now;
-      inhaleAudioFramesRef.current = 0;
-      inhalePeakRef.current = 0;
+      inhaleVolumesRef.current = [];
     } else if (phaseRef.current === "inhale") {
-      if (isBreathDetected) inhaleAudioFramesRef.current += 1;
-      inhalePeakRef.current = Math.max(inhalePeakRef.current, currentVolume);
+      inhaleVolumesRef.current.push(currentVolume);
       if (phaseElapsed >= INHALE_MS) {
         phaseRef.current = "exhale";
         phaseStartMsRef.current = now;
-        exhaleAudioFramesRef.current = 0;
-        exhalePeakRef.current = 0;
+        exhaleVolumesRef.current = [];
       }
     } else if (phaseRef.current === "exhale") {
-      if (isBreathDetected) exhaleAudioFramesRef.current += 1;
-      exhalePeakRef.current = Math.max(exhalePeakRef.current, currentVolume);
+      exhaleVolumesRef.current.push(currentVolume);
       if (phaseElapsed >= EXHALE_MS) {
-        const inhaleOk = inhaleAudioFramesRef.current >= MIN_PHASE_AUDIO
-                      && inhalePeakRef.current >= MIN_PHASE_PEAK;
-        const exhaleOk = exhaleAudioFramesRef.current >= MIN_PHASE_AUDIO
-                      && exhalePeakRef.current >= MIN_PHASE_PEAK;
+        // Statistical check: was there REAL breathing during both phases?
+        const nf = noiseFloorRef.current;
+        const inhaleOk = isPhaseValid(inhaleVolumesRef.current, nf);
+        const exhaleOk = isPhaseValid(exhaleVolumesRef.current, nf);
         if (inhaleOk && exhaleOk) {
           cyclesCompletedRef.current += 1;
         }
@@ -321,28 +279,15 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       cyclesCompletedRef.current = 0;
       phaseRef.current = "idle";
       phaseStartMsRef.current = 0;
-      inhaleAudioFramesRef.current = 0;
-      exhaleAudioFramesRef.current = 0;
-      inhalePeakRef.current = 0;
-      exhalePeakRef.current = 0;
+      inhaleVolumesRef.current = [];
+      exhaleVolumesRef.current = [];
       noiseFloorRef.current = 0;
       noiseFloorSamplesRef.current = [];
       noiseFloorCalibratedRef.current = false;
-      breathingConfidenceRef.current = 0;
-      yamnetBufferRef.current = [];
-      yamnetSamplesRef.current = 0;
-      yamnetInferringRef.current = false;
       setCurrentStats((prev) => ({ ...prev, cyclesCompleted: 0 }));
 
       await initAudio(stream);
-
-      // Load YAMNet + face landmarker in parallel
-      const [, yamnetOk] = await Promise.all([
-        getFaceLandmarker(),
-        loadYAMNet(),
-      ]);
-      yamnetReadyRef.current = yamnetOk;
-
+      await getFaceLandmarker();
       setEngineReady(true);
       requestRef.current = requestAnimationFrame(predictLoop);
     },
@@ -351,10 +296,6 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
 
   const stopEngine = useCallback(() => {
     if (requestRef.current) cancelAnimationFrame(requestRef.current);
-    if (processorRef.current) {
-      processorRef.current.onaudioprocess = null;
-      processorRef.current.disconnect();
-    }
     if (audioContextRef.current?.state !== "closed") {
       void audioContextRef.current?.close();
     }
