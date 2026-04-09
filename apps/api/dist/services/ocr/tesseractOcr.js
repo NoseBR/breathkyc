@@ -146,4 +146,3 @@ async function runTesseractOcrWithBestOrientation(imageBuffer) {
         orientedDecoded,
     };
 }
-//# sourceMappingURL=tesseractOcr.js.map

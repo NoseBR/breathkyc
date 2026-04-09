@@ -1,0 +1,20 @@
+@import "tailwindcss";
+@import "@repo/tailwind-config";
+
+@theme {
+  --color-primary: #00E5FF;
+  --color-accent: #B24BF3;
+  --color-error: #FF3D7F;
+  --font-sans: "DM Sans", sans-serif;
+}
+
+:root {
+  --background: #000000;
+  --foreground: #ffffff;
+}
+
+body {
+  color: var(--foreground);
+  background-color: var(--background);
+  font-family: var(--font-sans);
+}

@@ -505,4 +505,3 @@ function validateConfirmedDocumentFields(fields) {
         return 'Document number is required.';
     return null;
 }
-//# sourceMappingURL=brazilIdParse.js.map

@@ -27,38 +27,29 @@ model ApiKey {
   isActive  Boolean   @default(true)
   lastUsed  DateTime?
   createdAt DateTime  @default(now())
-
-  @@index([clientId])
 }
 
 model Verification {
-  id        String             @id @default(cuid())
-  sessionId String             @unique @default(cuid())
-  clientId  String
-  client    Client             @relation(fields: [clientId], references: [id])
-  status    VerificationStatus @default(PENDING)
+  id             String   @id @default(cuid())
+  sessionId      String   @unique @default(cuid())
+  clientId       String
+  client         Client   @relation(fields: [clientId], references: [id])
+  status         String   @default("PENDING")
 
-  geoResult      Json?
-  documentResult Json?
-  faceResult     Json?
-  breathResult   Json?
+  geoResult            String?
+  documentResult       String?
+  documentFaceTemplate String?
+  faceResult           String?
+  breathResult         String?
 
-  overallScore Float?
-  cpfHash      String?
-  expiresAt    DateTime
-  completedAt  DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  overallScore   Float?
+  cpfHash        String?
+  expiresAt      DateTime
+  completedAt    DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   @@index([clientId])
   @@index([cpfHash])
   @@index([status])
-}
-
-enum VerificationStatus {
-  PENDING
-  IN_PROGRESS
-  PASSED
-  FAILED
-  EXPIRED
 }

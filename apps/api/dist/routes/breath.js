@@ -1,102 +1,104 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.breathRouter = void 0;
 const express_1 = require("express");
+const client_1 = require("@prisma/client");
 const zod_1 = require("zod");
-const prisma_1 = require("../utils/prisma");
-const webhook_1 = require("../utils/webhook");
+const crypto_1 = require("../lib/crypto");
 const router = (0, express_1.Router)();
-exports.breathRouter = router;
+const prisma = new client_1.PrismaClient();
 const breathSchema = zod_1.z.object({
     sessionId: zod_1.z.string(),
-    audioFeatures: zod_1.z.record(zod_1.z.unknown()),
-    visualFeatures: zod_1.z.record(zod_1.z.unknown()),
-    correlationScore: zod_1.z.number().min(0).max(40),
-    totalScore: zod_1.z.number().min(0).max(100),
+    syncScore: zod_1.z.number().min(0).max(100),
+    audioPayload: zod_1.z.any().optional(),
 });
-// POST /v1/verify/breath — Submit breath analysis results
-router.post("/breath", async (req, res) => {
-    const parsed = breathSchema.safeParse(req.body);
-    if (!parsed.success) {
-        res.status(400).json({ error: "Invalid input", details: parsed.error.flatten() });
-        return;
-    }
-    const { sessionId, audioFeatures, visualFeatures, correlationScore, totalScore } = parsed.data;
+router.post('/', async (req, res) => {
     try {
-        const verification = await prisma_1.prisma.verification.findUnique({
-            where: { sessionId },
-            include: { client: true },
+        const body = breathSchema.parse(req.body);
+        const verification = await prisma.verification.findUnique({
+            where: { sessionId: body.sessionId }
         });
         if (!verification) {
-            res.status(404).json({ error: "Session not found" });
-            return;
+            return res.status(404).json({ error: 'Session not found' });
         }
-        if (new Date() > verification.expiresAt) {
-            res.status(410).json({ error: "Session expired" });
-            return;
+        if (!verification.faceResult) {
+            return res.status(400).json({
+                error: 'Face verification must succeed before breath analysis.',
+            });
         }
-        // Server-side sanity checks
-        const audioScore = audioFeatures.overallScore ?? 0;
-        const visualScore = visualFeatures.overallScore ?? 0;
-        // Verify scores are within reasonable bounds
-        if (audioScore > 30 || visualScore > 30 || correlationScore > 40) {
-            res.status(400).json({ error: "Score values out of acceptable range" });
-            return;
+        let facePassed = false;
+        try {
+            const raw = verification.faceResult;
+            const parsed = raw.startsWith('{')
+                ? JSON.parse(raw)
+                : JSON.parse((0, crypto_1.decrypt)(raw));
+            facePassed = Boolean(parsed.passed);
         }
-        // Check that total matches components (with tolerance)
-        const expectedTotal = audioScore + visualScore + correlationScore;
-        if (Math.abs(totalScore - expectedTotal) > 2) {
-            res.status(400).json({ error: "Score mismatch" });
-            return;
+        catch {
+            return res.status(400).json({ error: 'Invalid face verification state.' });
         }
-        const passed = totalScore >= 70;
-        const finalStatus = passed ? "PASSED" : "FAILED";
-        // Calculate overall KYC score (average of all steps)
-        const geoScore = verification.geoResult ? 100 : 0;
-        const docScore = verification.documentResult ? 85 : 0;
-        const faceScore = verification.faceResult?.matchScore ?? 0;
-        const overallScore = Math.round((geoScore + docScore + faceScore + totalScore) / 4);
-        const breathResult = JSON.parse(JSON.stringify({
-            audioFeatures,
-            visualFeatures,
-            correlationScore,
-            totalScore,
-            audioScore,
-            visualScore,
+        if (!facePassed) {
+            return res.status(400).json({
+                error: 'Face verification did not pass. Complete facial match before breath analysis.',
+            });
+        }
+        // Client sends combined breath confidence (mouth motion and/or breath audio).
+        const passed = body.syncScore >= 65;
+        const breathResult = {
+            syncScore: body.syncScore,
             passed,
-        }));
-        await prisma_1.prisma.verification.update({
-            where: { sessionId },
+            timestamp: new Date().toISOString()
+        };
+        const finalStatus = passed ? 'COMPLETED' : 'FAILED';
+        // B2: Encrypting breath protocol outcome
+        const encryptedResult = (0, crypto_1.encrypt)(JSON.stringify(breathResult));
+        await prisma.verification.update({
+            where: { sessionId: body.sessionId },
             data: {
-                breathResult,
-                overallScore,
-                status: finalStatus,
-                completedAt: new Date(),
-            },
+                breathResult: encryptedResult,
+                status: finalStatus
+            }
         });
-        // Dispatch webhook to B2B client if configured
-        if (verification.client.webhookUrl) {
-            // Fire and forget
-            (0, webhook_1.dispatchWebhook)(verification.client.webhookUrl, {
-                sessionId,
-                status: finalStatus,
-                overallScore,
-                completedAt: new Date().toISOString(),
-            }).catch(console.error);
+        // --- MOCK WEBHOOK DISPATCH ---
+        if (finalStatus === 'COMPLETED') {
+            const updatedVerification = await prisma.verification.findUnique({
+                where: { sessionId: body.sessionId }
+            });
+            const safeDecrypt = (val) => {
+                if (!val)
+                    return null;
+                try {
+                    return JSON.parse((0, crypto_1.decrypt)(val));
+                }
+                catch {
+                    return null;
+                }
+            };
+            const webhookPayload = {
+                event: 'verification.completed',
+                sessionId: body.sessionId,
+                status: 'COMPLETED',
+                timestamp: new Date().toISOString(),
+                results: {
+                    geo: updatedVerification?.geoResult ? JSON.parse(updatedVerification.geoResult) : null,
+                    document: safeDecrypt(updatedVerification?.documentResult || null),
+                    face: safeDecrypt(updatedVerification?.faceResult || null),
+                    breath: breathResult,
+                }
+            };
+            console.log('\n══════════════════════════════════════════');
+            console.log('🔔 WEBHOOK DISPATCH (mock)');
+            console.log('══════════════════════════════════════════');
+            console.log(JSON.stringify(webhookPayload, null, 2));
+            console.log('══════════════════════════════════════════\n');
         }
-        res.json({
-            audioScore,
-            visualScore,
-            correlationScore,
-            totalScore,
-            passed,
-            overallScore,
-            status: finalStatus,
-        });
+        res.json(breathResult);
     }
-    catch (err) {
-        console.error("[verify/breath]", err);
-        res.status(500).json({ error: "Breath verification failed" });
+    catch (error) {
+        if (error instanceof zod_1.z.ZodError) {
+            return res.status(400).json({ error: error.errors });
+        }
+        console.error('Breath verification error:', error);
+        res.status(500).json({ status: 'error', message: 'Core server error evaluating breath synchronization.' });
     }
 });
-//# sourceMappingURL=breath.js.map
+exports.default = router;

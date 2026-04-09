@@ -1,57 +1,57 @@
-import "dotenv/config";
-import express from "express";
-import cors from "cors";
-import helmet from "helmet";
-import { verificationRouter } from "./routes/verification";
-import { breathRouter } from "./routes/breath";
-import { dashboardRouter } from "./routes/dashboard";
-import { webhookRouter } from "./routes/webhook";
-import { loggingMiddleware } from "./middleware/logging";
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import { PrismaClient } from '@prisma/client';
 
 const app = express();
-const PORT = process.env.PORT ?? 3001;
+const port = Number(process.env.PORT) || 3001;
+const prisma = new PrismaClient();
 
-// Security & parsing
-app.use(helmet());
-app.use(cors({ origin: process.env.CORS_ORIGIN ?? "http://localhost:3000" }));
-app.use(express.json({ limit: "10mb" }));
-app.use(loggingMiddleware);
+import verificationRoutes from './routes/verification';
+import documentRoutes from './routes/document';
+import faceRoutes from './routes/face';
+import breathRoutes from './routes/breath';
+import statusRoutes from './routes/status';
+import { apiKeyAuth } from './middleware/auth';
 
-// Health check
-app.get("/health", (_req, res) => {
-  res.json({
-    status: "ok",
-    service: "breathkyc-api",
-    timestamp: new Date().toISOString(),
-    env: {
-      hasDbUrl: !!process.env.DATABASE_URL,
-      corsOrigin: process.env.CORS_ORIGIN ?? "NOT SET",
-      nodeEnv: process.env.NODE_ENV ?? "NOT SET",
-    },
-  });
-});
+const corsOrigin = process.env.CORS_ORIGIN || true;
 
-// Routes
-app.use("/v1/verify", verificationRouter);
-app.use("/v1/verify", breathRouter);
-app.use("/v1/dashboard", dashboardRouter);
-app.use("/v1/webhook", webhookRouter);
-
-// Global error handler
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(
-  (
-    err: Error,
-    _req: express.Request,
-    res: express.Response,
-    _next: express.NextFunction
-  ) => {
-    console.error("[ERROR]", err.message);
-    res.status(500).json({ error: "Internal server error" });
-  }
+  cors({
+    origin: corsOrigin,
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'x-breath-demo'],
+  })
 );
+app.use(express.json());
 
-app.listen(PORT, () => {
-  console.log(`BreathKYC API running on http://localhost:${PORT}`);
+// Apply API key auth to all verification routes
+app.use('/v1/verify', apiKeyAuth);
+
+app.use('/v1/verify', verificationRoutes);
+app.use('/v1/verify/document', documentRoutes);
+app.use('/v1/verify/face', faceRoutes);
+app.use('/v1/verify/breath', breathRoutes);
+app.use('/v1/verify/status', statusRoutes);
+
+// Basic health check endpoint
+app.get('/health', async (req, res) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    res.json({
+      status: 'ok',
+      db: 'connected',
+      corsOrigin: String(corsOrigin),
+      nodeEnv: process.env.NODE_ENV,
+    });
+  } catch (error) {
+    console.error('Database connection error:', error);
+    res.status(500).json({ status: 'error', db: 'disconnected' });
+  }
 });
 
-export default app;
+app.listen(port, '0.0.0.0', () => {
+  console.log(`BreathKYC API running on http://0.0.0.0:${port}`);
+});

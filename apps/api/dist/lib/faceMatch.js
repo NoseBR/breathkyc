@@ -260,4 +260,3 @@ function compareTemplates(doc, live) {
         return 0;
     return similarityToMatchPercent(cosineSimilarity(doc, live));
 }
-//# sourceMappingURL=faceMatch.js.map
