@@ -120,7 +120,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     let audioOnlyScore = 0;
 
     if (len > 35) {
-      const audibleBreath = maxV > 0.018;
+      const audibleBreath = maxV > 0.06;
       const mouthMotion = maxM > 0.042;
 
       if (mouthMotion) {
@@ -158,7 +158,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     }
 
     // Envelope for cycle counting: requires BOTH mouth and audio signal
-    const bothActive = normAperture > 0.03 && currentVolume > 0.015;
+    const bothActive = normAperture > 0.03 && currentVolume > 0.05;
     const envelope = bothActive
       ? Math.min(1, (normAperture * 0.5 + currentVolume * 0.5) * 1.8)
       : 0;
