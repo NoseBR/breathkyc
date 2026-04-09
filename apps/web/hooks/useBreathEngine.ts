@@ -31,36 +31,25 @@ function variance(arr: number[]): number {
 }
 
 /**
- * Checks whether a phase had real breathing using noise-subtracted analysis.
- * Subtracts the calibrated noise floor so ambient noise becomes ~0.
- * Mouth-only motion adds zero audio → all net values ≈ 0 → always fails.
+ * Checks whether a phase had real breathing by comparing against idle baseline.
+ * The idle average is the mic's volume when the user is NOT breathing (just before
+ * this phase). Mouth-only motion adds zero audio → ratio ≈ 1.0 → always fails.
  */
-function isPhaseValid(volumes: number[], noiseFloor: number): boolean {
+function isPhaseValid(volumes: number[], idleAvg: number): boolean {
   if (volumes.length < 20) return false;
 
-  // 1. Subtract noise floor — only count signal ABOVE ambient
-  const nf = Math.max(noiseFloor, 0.03); // minimum floor even in silent rooms
-  const netVolumes = volumes.map(v => Math.max(0, v - nf));
+  const avg = volumes.reduce((a, b) => a + b, 0) / volumes.length;
+  const peak = Math.max(...volumes);
 
-  const netAvg = netVolumes.reduce((a, b) => a + b, 0) / netVolumes.length;
-  const netPeak = Math.max(...netVolumes);
-  const netStdDev = Math.sqrt(
-    netVolumes.reduce((s, v) => s + (v - netAvg) ** 2, 0) / netVolumes.length
-  );
+  // PRIMARY CHECK: breathing must be clearly louder than the idle baseline.
+  // Mouth-only motion produces the same volume as sitting still → ratio ~1.0 → FAIL.
+  const baseline = Math.max(idleAvg, 0.03);
+  if (avg / baseline < 2.0) return false;  // average must be 2× idle
+  if (peak / baseline < 3.0) return false; // peak must be 3× idle
 
-  // Net thresholds: signal above ambient must be substantial
-  if (netAvg < 0.10) return false;   // sustained sound above noise
-  if (netPeak < 0.20) return false;  // clear peak above noise
-  if (netStdDev < 0.03) return false; // variation (not flat hum)
-
-  // 2. Frame coverage: ≥40% of frames must be clearly above noise floor
-  const clearThreshold = nf * 1.8;
-  const framesAbove = volumes.filter(v => v > clearThreshold).length;
-  if (framesAbove / volumes.length < 0.40) return false;
-
-  // 3. Raw volume hard floor — absolute minimum regardless of noise floor
-  const rawAvg = volumes.reduce((a, b) => a + b, 0) / volumes.length;
-  if (rawAvg < 0.15) return false;
+  // ABSOLUTE FLOOR: even if idle is very quiet, need real signal
+  if (avg < 0.12) return false;
+  if (peak < 0.20) return false;
 
   return true;
 }
@@ -94,10 +83,9 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
   const inhaleVolumesRef = useRef<number[]>([]);
   const exhaleVolumesRef = useRef<number[]>([]);
 
-  // Noise floor calibration — measured during first idle phase
-  const noiseFloorRef = useRef(0);
-  const noiseFloorSamplesRef = useRef<number[]>([]);
-  const noiseFloorCalibratedRef = useRef(false);
+  // Idle baseline — recalculated every idle phase for comparison
+  const idleVolumesRef = useRef<number[]>([]);
+  const idleAvgRef = useRef(0);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -219,24 +207,25 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     if (phaseStartMsRef.current === 0) phaseStartMsRef.current = now;
     const phaseElapsed = now - phaseStartMsRef.current;
 
-    // Noise floor calibration during idle phase
-    if (phaseRef.current === "idle" && !noiseFloorCalibratedRef.current) {
-      noiseFloorSamplesRef.current.push(currentVolume);
-      if (noiseFloorSamplesRef.current.length >= 60) {
-        const sorted = [...noiseFloorSamplesRef.current].sort((a, b) => a - b);
-        noiseFloorRef.current = sorted[Math.floor(sorted.length * 0.95)]!;
-        noiseFloorCalibratedRef.current = true;
-      }
+    // Collect idle volumes every idle phase for baseline comparison
+    if (phaseRef.current === "idle") {
+      idleVolumesRef.current.push(currentVolume);
     }
 
-    // Real-time indicator for UI (adaptive to noise floor)
-    const liveThreshold = Math.max(0.25, noiseFloorRef.current * 2.5);
+    // Real-time indicator for UI
+    const liveThreshold = Math.max(0.20, idleAvgRef.current * 2.5);
     const isBreathDetected = currentVolume > liveThreshold;
 
     if (phaseRef.current === "idle" && phaseElapsed >= PAUSE_MS) {
+      // Compute idle baseline from this idle period
+      const samples = idleVolumesRef.current;
+      if (samples.length > 5) {
+        idleAvgRef.current = samples.reduce((a, b) => a + b, 0) / samples.length;
+      }
       phaseRef.current = "inhale";
       phaseStartMsRef.current = now;
       inhaleVolumesRef.current = [];
+      idleVolumesRef.current = [];
     } else if (phaseRef.current === "inhale") {
       inhaleVolumesRef.current.push(currentVolume);
       if (phaseElapsed >= INHALE_MS) {
@@ -247,10 +236,10 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     } else if (phaseRef.current === "exhale") {
       exhaleVolumesRef.current.push(currentVolume);
       if (phaseElapsed >= EXHALE_MS) {
-        // Statistical check: was there REAL breathing during both phases?
-        const nf = noiseFloorRef.current;
-        const inhaleOk = isPhaseValid(inhaleVolumesRef.current, nf);
-        const exhaleOk = isPhaseValid(exhaleVolumesRef.current, nf);
+        // Compare breathing audio against the idle baseline from just before
+        const idle = idleAvgRef.current;
+        const inhaleOk = isPhaseValid(inhaleVolumesRef.current, idle);
+        const exhaleOk = isPhaseValid(exhaleVolumesRef.current, idle);
         if (inhaleOk && exhaleOk) {
           cyclesCompletedRef.current += 1;
         }
@@ -302,9 +291,8 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       phaseStartMsRef.current = 0;
       inhaleVolumesRef.current = [];
       exhaleVolumesRef.current = [];
-      noiseFloorRef.current = 0;
-      noiseFloorSamplesRef.current = [];
-      noiseFloorCalibratedRef.current = false;
+      idleVolumesRef.current = [];
+      idleAvgRef.current = 0;
       setCurrentStats((prev) => ({ ...prev, cyclesCompleted: 0 }));
 
       await initAudio(stream);
