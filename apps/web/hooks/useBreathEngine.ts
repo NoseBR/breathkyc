@@ -31,25 +31,21 @@ function variance(arr: number[]): number {
 }
 
 /**
- * Checks whether a phase had real breathing by comparing against idle baseline.
- * The idle average is the mic's volume when the user is NOT breathing (just before
- * this phase). Mouth-only motion adds zero audio → ratio ≈ 1.0 → always fails.
+ * Checks whether a phase had real breathing by comparing breath-band energy
+ * (200-2000Hz) against the idle baseline measured just before this phase.
+ * Mouth opening adds ZERO energy to any frequency band → ratio ≈ 1.0 → always fails.
  */
-function isPhaseValid(volumes: number[], idleAvg: number): boolean {
-  if (volumes.length < 20) return false;
+function isPhaseValid(energies: number[], idleAvg: number): boolean {
+  if (energies.length < 20) return false;
 
-  const avg = volumes.reduce((a, b) => a + b, 0) / volumes.length;
-  const peak = Math.max(...volumes);
+  const avg = energies.reduce((a, b) => a + b, 0) / energies.length;
+  const peak = Math.max(...energies);
 
-  // PRIMARY CHECK: breathing must be clearly louder than the idle baseline.
-  // Mouth-only motion produces the same volume as sitting still → ratio ~1.0 → FAIL.
-  const baseline = Math.max(idleAvg, 0.03);
-  if (avg / baseline < 2.0) return false;  // average must be 2× idle
-  if (peak / baseline < 3.0) return false; // peak must be 3× idle
-
-  // ABSOLUTE FLOOR: even if idle is very quiet, need real signal
-  if (avg < 0.12) return false;
-  if (peak < 0.20) return false;
+  // Breathing must increase energy in the 200-2000Hz band above idle.
+  // Mouth opening cannot create energy → ratio = 1.0 → FAIL.
+  const baseline = Math.max(idleAvg, 0.01);
+  if (avg / baseline < 1.4) return false;  // avg must be 1.4× idle
+  if (peak / baseline < 1.8) return false; // peak must be 1.8× idle
 
   return true;
 }
@@ -89,10 +85,8 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
-  const dataArrayRef = useRef<Uint8Array | null>(null);
   const freqDataRef = useRef<Uint8Array | null>(null);
-  const prevSpectrumRef = useRef<Float32Array | null>(null);
-  // Tracks whether the mic ever produced real audio — blocks cycles if audio is dead
+  // Tracks whether the mic ever produced real frequency data
   const audioActiveRef = useRef(false);
 
   const initAudio = useCallback(async (stream: MediaStream) => {
@@ -119,68 +113,51 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
 
       audioContextRef.current = audioCtx;
       analyserRef.current = analyser;
-      dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
       freqDataRef.current = new Uint8Array(analyser.frequencyBinCount);
     } catch (e) {
       console.error("Audio Context Init Failed:", e);
     }
   }, []);
 
-  const getRMSVolume = useCallback(() => {
-    const data = dataArrayRef.current;
-    if (!data || !analyserRef.current) return 0;
-
-    let sum = 0;
-    analyserRef.current.getByteTimeDomainData(data as Uint8Array<ArrayBuffer>);
-
-    for (let i = 0; i < data.length; i++) {
-      const value = data[i]!;
-      const amplitude = (value - 128) / 128.0;
-      sum += amplitude * amplitude;
-    }
-    const rms = Math.sqrt(sum / data.length);
-    return Math.min(rms * 8, 1);
-  }, []);
-
-  /** Spectral flux: measures how much the frequency spectrum changes frame-to-frame.
-   *  Breathing creates sudden spectral change (high flux). Static mic noise doesn't (zero flux). */
-  const getSpectralFlux = useCallback(() => {
+  /**
+   * Computes average energy in the 200-2000 Hz band from frequency domain data.
+   * Breathing produces broadband energy in this range.
+   * Mouth opening without sound creates ZERO energy — physically impossible.
+   * Returns 0-1 normalized band energy (dB-scaled byte avg / 255).
+   */
+  const getBreathBandEnergy = useCallback(() => {
     const analyser = analyserRef.current;
     const freqData = freqDataRef.current;
     if (!analyser || !freqData) return 0;
 
     analyser.getByteFrequencyData(freqData as Uint8Array<ArrayBuffer>);
 
-    const current = new Float32Array(freqData.length);
+    const sampleRate = audioContextRef.current?.sampleRate || 44100;
+    const binWidth = sampleRate / analyser.fftSize;
+    const minBin = Math.floor(200 / binWidth);
+    const maxBin = Math.ceil(2000 / binWidth);
+
+    let bandSum = 0;
+    let bandCount = 0;
+    let totalEnergy = 0;
     for (let i = 0; i < freqData.length; i++) {
-      current[i] = freqData[i]! / 255;
-    }
-
-    let flux = 0;
-    const prev = prevSpectrumRef.current;
-    if (prev && prev.length === current.length) {
-      for (let i = 0; i < current.length; i++) {
-        const diff = current[i]! - prev[i]!;
-        if (diff > 0) flux += diff; // onset-only (positive changes)
+      totalEnergy += freqData[i]!;
+      if (i >= minBin && i <= maxBin) {
+        bandSum += freqData[i]!;
+        bandCount++;
       }
-      flux /= current.length;
     }
 
-    prevSpectrumRef.current = current;
-    return flux;
+    // Mark audio as active if any frequency data is present
+    if (totalEnergy > freqData.length * 2) audioActiveRef.current = true;
+
+    return bandCount > 0 ? (bandSum / bandCount) / 255 : 0;
   }, []);
 
   const calculateSync = useCallback((results: FaceLandmarkerResult) => {
-    const currentVolume = getRMSVolume();
-    const spectralFlux = getSpectralFlux();
-
-    // Track whether the microphone is actually producing audio data
-    if (currentVolume > 0.01) audioActiveRef.current = true;
-
-    // Gate volume by spectral flux — static mic noise has near-zero flux,
-    // so breathSignal ≈ 0 even if volume is high. Real breathing has high flux.
-    const fluxGate = Math.max(0, Math.min(1, (spectralFlux - 0.003) / 0.012));
-    const breathSignal = currentVolume * fluxGate;
+    // PRIMARY DETECTION: energy in 200-2000 Hz breath band (frequency domain).
+    // This completely ignores time-domain volume — only spectral energy matters.
+    const bandEnergy = getBreathBandEnergy();
 
     let mouthAperture = 0;
     const marks = results.faceLandmarks?.[0] as { x: number; y: number }[] | undefined;
@@ -194,7 +171,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
 
     const normAperture = Math.min(mouthAperture * 20, 1);
 
-    historyRef.current.push({ vol: breathSignal, mouth: normAperture });
+    historyRef.current.push({ vol: bandEnergy, mouth: normAperture });
     if (historyRef.current.length > 100) historyRef.current.shift();
 
     const len = historyRef.current.length;
@@ -254,13 +231,15 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     if (phaseStartMsRef.current === 0) phaseStartMsRef.current = now;
     const phaseElapsed = now - phaseStartMsRef.current;
 
-    // Collect idle breath signals for baseline comparison
+    // Collect idle band energy for baseline comparison
     if (phaseRef.current === "idle") {
-      idleVolumesRef.current.push(breathSignal);
+      idleVolumesRef.current.push(bandEnergy);
     }
 
-    // Real-time indicator: only lights up when spectral flux confirms real sound
-    const isBreathDetected = breathSignal > 0.10;
+    // Real-time indicator: band energy must be notably above idle baseline
+    const isBreathDetected = idleAvgRef.current > 0
+      ? bandEnergy > idleAvgRef.current * 1.4
+      : bandEnergy > 0.20;
 
     if (phaseRef.current === "idle" && phaseElapsed >= PAUSE_MS) {
       // Compute idle baseline from this idle period
@@ -273,14 +252,14 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       inhaleVolumesRef.current = [];
       idleVolumesRef.current = [];
     } else if (phaseRef.current === "inhale") {
-      inhaleVolumesRef.current.push(breathSignal);
+      inhaleVolumesRef.current.push(bandEnergy);
       if (phaseElapsed >= INHALE_MS) {
         phaseRef.current = "exhale";
         phaseStartMsRef.current = now;
         exhaleVolumesRef.current = [];
       }
     } else if (phaseRef.current === "exhale") {
-      exhaleVolumesRef.current.push(breathSignal);
+      exhaleVolumesRef.current.push(bandEnergy);
       if (phaseElapsed >= EXHALE_MS) {
         // Compare breathing audio against the idle baseline from just before.
         // HARD BLOCK: if mic never produced data, never count a cycle.
@@ -302,7 +281,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     else phaseProgress = Math.min(1, pe / EXHALE_MS);
 
     setCurrentStats({
-      audioVolume: breathSignal,
+      audioVolume: bandEnergy,
       mouthAperture: normAperture,
       syncScore: Math.round(syncCorrelationScore),
       mouthBreathScore: Math.round(mouthOnlyScore),
@@ -313,7 +292,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       phaseProgress,
       breathingDetected: isBreathDetected,
     });
-  }, [getRMSVolume, getSpectralFlux]);
+  }, [getBreathBandEnergy]);
 
   const predictLoop = useCallback(async () => {
     const video = videoRef.current;
@@ -340,7 +319,6 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       exhaleVolumesRef.current = [];
       idleVolumesRef.current = [];
       idleAvgRef.current = 0;
-      prevSpectrumRef.current = null;
       audioActiveRef.current = false;
       setCurrentStats((prev) => ({ ...prev, cyclesCompleted: 0 }));
 
