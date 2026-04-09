@@ -40,7 +40,7 @@ function computeRMS(samples: Float32Array): number {
  * Audio amplification gain applied to microphone input.
  * Boosted to 8x so normal breathing registers on phone mics.
  */
-const MIC_GAIN = 8.0;
+const MIC_GAIN = 20.0;
 
 /**
  * Fallback minimum RMS threshold (before adaptive calibration kicks in).
@@ -187,7 +187,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
         if (samples.length > 10) {
           const avgNoise = samples.reduce((a, b) => a + b, 0) / samples.length;
           noiseFloorRef.current = avgNoise;
-          breathThresholdRef.current = Math.max(RMS_MIN_THRESHOLD, avgNoise * 2.5);
+          breathThresholdRef.current = Math.max(RMS_MIN_THRESHOLD, avgNoise * 1.8);
           if (!noiseCalibrated.current) {
             console.log("[BreathEngine] Noise calibrated:",
               "floor=", avgNoise.toFixed(5),
