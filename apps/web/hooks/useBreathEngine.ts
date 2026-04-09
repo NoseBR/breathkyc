@@ -38,12 +38,16 @@ function computeRMS(samples: Float32Array): number {
 }
 
 /**
- * Minimum RMS energy for audio to be considered "real sound".
- * Mic electronic self-noise is typically 0.001–0.003.
- * Audible breathing is typically 0.008–0.1.
- * This threshold MUST be above mic noise floor.
+ * Audio amplification gain applied to microphone input.
+ * Phone mics can be very quiet for breathing — this boosts the signal.
  */
-const RMS_BREATH_THRESHOLD = 0.007;
+const MIC_GAIN = 4.0;
+
+/**
+ * Fallback minimum RMS threshold (before adaptive calibration kicks in).
+ * After idle phase calibration, threshold = max(this, noiseFloor × 2.5).
+ */
+const RMS_MIN_THRESHOLD = 0.002;
 
 export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | null>) {
   const [engineReady, setEngineReady] = useState(false);
@@ -79,6 +83,12 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
   // Latest RMS from audio analysis (updated every ~93ms from ScriptProcessor)
   const latestRmsRef = useRef(0);
 
+  // Adaptive noise floor: calibrated during idle phase
+  const noiseFloorRef = useRef(0);
+  const noiseCalibrationRef = useRef<number[]>([]);
+  const noiseCalibrated = useRef(false);
+  const breathThresholdRef = useRef(RMS_MIN_THRESHOLD);
+
   // Audio pipeline refs
   const audioContextRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
@@ -93,6 +103,11 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
       const source = audioCtx.createMediaStreamSource(stream);
 
+      // Amplify mic signal — phone mics are often very quiet for breathing
+      const gainNode = audioCtx.createGain();
+      gainNode.gain.value = MIC_GAIN;
+      source.connect(gainNode);
+
       const bufferSize = 4096;
       const processor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
 
@@ -102,7 +117,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
         latestRmsRef.current = rms;
       };
 
-      source.connect(processor);
+      gainNode.connect(processor);
       // Silent output to keep processor alive
       const silentGain = audioCtx.createGain();
       silentGain.gain.value = 0;
@@ -123,9 +138,10 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
 
   const calculateSync = useCallback((results: FaceLandmarkerResult) => {
     const rms = latestRmsRef.current;
+    const threshold = breathThresholdRef.current;
 
-    // breathingDetected = raw audio energy is above the noise floor
-    const isBreathDetected = rms > RMS_BREATH_THRESHOLD;
+    // breathingDetected = raw audio energy is above the adaptive threshold
+    const isBreathDetected = rms > threshold;
 
     let mouthAperture = 0;
     const marks = results.faceLandmarks?.[0] as { x: number; y: number }[] | undefined;
@@ -164,10 +180,29 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     if (phaseStartMsRef.current === 0) phaseStartMsRef.current = now;
     const phaseElapsed = now - phaseStartMsRef.current;
 
-    if (phaseRef.current === "idle" && phaseElapsed >= PAUSE_MS) {
-      phaseRef.current = "inhale";
-      phaseStartMsRef.current = now;
-      inhaleRmsRef.current = [];
+    if (phaseRef.current === "idle") {
+      // Calibrate noise floor during idle phase (user should be silent)
+      noiseCalibrationRef.current.push(rms);
+      if (phaseElapsed >= PAUSE_MS) {
+        // Set adaptive threshold based on measured noise floor
+        const samples = noiseCalibrationRef.current;
+        if (samples.length > 10) {
+          const avgNoise = samples.reduce((a, b) => a + b, 0) / samples.length;
+          noiseFloorRef.current = avgNoise;
+          // Threshold = 2.5× noise floor, but at least RMS_MIN_THRESHOLD
+          breathThresholdRef.current = Math.max(RMS_MIN_THRESHOLD, avgNoise * 2.5);
+          if (!noiseCalibrated.current) {
+            console.log("[BreathEngine] Noise calibrated:",
+              "floor=", avgNoise.toFixed(5),
+              "threshold=", breathThresholdRef.current.toFixed(5));
+            noiseCalibrated.current = true;
+          }
+        }
+        noiseCalibrationRef.current = [];
+        phaseRef.current = "inhale";
+        phaseStartMsRef.current = now;
+        inhaleRmsRef.current = [];
+      }
     } else if (phaseRef.current === "inhale") {
       // Collect RMS values during inhale
       inhaleRmsRef.current.push(rms);
@@ -189,35 +224,33 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
         const inhaleValues = inhaleRmsRef.current;
         const exhaleValues = exhaleRmsRef.current;
 
-        // Count how many RMS samples exceeded the threshold in each phase
-        const inhaleAbove = inhaleValues.filter(v => v > RMS_BREATH_THRESHOLD).length;
-        const exhaleAbove = exhaleValues.filter(v => v > RMS_BREATH_THRESHOLD).length;
+        const t = breathThresholdRef.current;
 
-        // Require at least 30% of samples above threshold in EACH phase
+        // Count how many RMS samples exceeded the adaptive threshold in each phase
+        const inhaleAbove = inhaleValues.filter(v => v > t).length;
+        const exhaleAbove = exhaleValues.filter(v => v > t).length;
+
+        // Require at least 25% of samples above threshold in EACH phase
         const inhaleRatio = inhaleValues.length > 0 ? inhaleAbove / inhaleValues.length : 0;
         const exhaleRatio = exhaleValues.length > 0 ? exhaleAbove / exhaleValues.length : 0;
 
-        const inhaleAvgRms = inhaleValues.length > 0
-          ? inhaleValues.reduce((a, b) => a + b, 0) / inhaleValues.length : 0;
-        const exhaleAvgRms = exhaleValues.length > 0
-          ? exhaleValues.reduce((a, b) => a + b, 0) / exhaleValues.length : 0;
-
-        const inhaleOk = inhaleRatio >= 0.30 && inhaleAvgRms > RMS_BREATH_THRESHOLD * 0.7;
-        const exhaleOk = exhaleRatio >= 0.30 && exhaleAvgRms > RMS_BREATH_THRESHOLD * 0.7;
+        const inhaleOk = inhaleRatio >= 0.25;
+        const exhaleOk = exhaleRatio >= 0.25;
 
         if (inhaleOk && exhaleOk) {
           cyclesCompletedRef.current += 1;
           console.log(
             "[BreathEngine] ✅ CYCLE COUNTED",
-            `| inhale: ratio=${(inhaleRatio*100).toFixed(0)}% avgRMS=${inhaleAvgRms.toFixed(4)}`,
-            `| exhale: ratio=${(exhaleRatio*100).toFixed(0)}% avgRMS=${exhaleAvgRms.toFixed(4)}`
+            `| inhale: ${(inhaleRatio*100).toFixed(0)}% above threshold`,
+            `| exhale: ${(exhaleRatio*100).toFixed(0)}% above threshold`,
+            `| threshold=${t.toFixed(5)} noiseFloor=${noiseFloorRef.current.toFixed(5)}`
           );
         } else {
           console.log(
             "[BreathEngine] ❌ CYCLE REJECTED",
-            `| inhaleOk=${inhaleOk} (ratio=${(inhaleRatio*100).toFixed(0)}% avgRMS=${inhaleAvgRms.toFixed(4)})`,
-            `| exhaleOk=${exhaleOk} (ratio=${(exhaleRatio*100).toFixed(0)}% avgRMS=${exhaleAvgRms.toFixed(4)})`,
-            `| threshold=${RMS_BREATH_THRESHOLD}`
+            `| inhale: ${(inhaleRatio*100).toFixed(0)}% (need 25%)`,
+            `| exhale: ${(exhaleRatio*100).toFixed(0)}% (need 25%)`,
+            `| threshold=${t.toFixed(5)} noiseFloor=${noiseFloorRef.current.toFixed(5)}`
           );
         }
 
@@ -269,6 +302,10 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       inhaleRmsRef.current = [];
       exhaleRmsRef.current = [];
       latestRmsRef.current = 0;
+      noiseFloorRef.current = 0;
+      noiseCalibrationRef.current = [];
+      noiseCalibrated.current = false;
+      breathThresholdRef.current = RMS_MIN_THRESHOLD;
       setCurrentStats((prev) => ({ ...prev, cyclesCompleted: 0 }));
 
       await Promise.all([
