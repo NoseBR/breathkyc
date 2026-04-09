@@ -1,5 +1,5 @@
 {
-  "buildCommand": "npm run build -- --filter=web",
+  "buildCommand": "cd apps/web && npx next build",
   "outputDirectory": "apps/web/.next",
   "framework": "nextjs",
   "installCommand": "npm install"
