@@ -223,9 +223,9 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
         const inhaleRatio = inhaleValues.length > 0 ? inhaleAbove / inhaleValues.length : 0;
         const exhaleRatio = exhaleValues.length > 0 ? exhaleAbove / exhaleValues.length : 0;
 
-        // Inhale is naturally quieter than exhale — lower bar for inhale
-        const inhaleOk = inhaleRatio >= 0.15;
-        const exhaleOk = exhaleRatio >= 0.25;
+        // Inhale is naturally quieter — use lower threshold + lower ratio
+        const inhaleOk = inhaleValues.filter(v => v > t * 0.5).length / (inhaleValues.length || 1) >= 0.10;
+        const exhaleOk = exhaleRatio >= 0.20;
 
         if (inhaleOk && exhaleOk) {
           cyclesCompletedRef.current += 1;
