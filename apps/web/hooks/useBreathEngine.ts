@@ -7,19 +7,19 @@ import type { FaceLandmarkerResult } from "@mediapipe/tasks-vision";
 /** Full in–out cycles required to complete the breath step UI (~2–3 deep breaths) */
 export const BREATH_CYCLES_REQUIRED = 3;
 
+export type BreathPhase = "idle" | "inhale" | "exhale";
+
 export interface BreathStats {
   audioVolume: number;
   mouthAperture: number;
-  /** Correlation when both mouth and mic move together */
   syncScore: number;
-  /** Mouth-only: visible inhale/exhale (lip separation changes) */
   mouthBreathScore: number;
-  /** Audio-only: breath sounds / airflow without requiring mouth sync */
   audioBreathScore: number;
-  /** Combined score — requires BOTH mouth and audio to pass */
   breathScore: number;
-  /** Completed deep breath cycles (peak → valley on mouth and/or volume envelope) */
   cyclesCompleted: number;
+  breathPhase: BreathPhase;
+  /** 0–1 progress through the current phase */
+  phaseProgress: number;
 }
 
 function variance(arr: number[]): number {
@@ -39,19 +39,22 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     audioBreathScore: 0,
     breathScore: 0,
     cyclesCompleted: 0,
+    breathPhase: "idle" as BreathPhase,
+    phaseProgress: 0,
   });
 
   const [mouthLandmarks, setMouthLandmarks] = useState<{ x: number; y: number }[]>([]);
 
   const historyRef = useRef<{ vol: number; mouth: number }[]>([]);
-  const comboEmaRef = useRef(0);
-  const runningPeakRef = useRef(0);
-  const belowLowFramesRef = useRef(0);
   const cyclesCompletedRef = useRef(0);
-  const lastCycleMsRef = useRef(0);
   const requestRef = useRef<number>(0);
   const lastVideoTimeRef = useRef<number>(-1);
-  const audioDetectedInPeakRef = useRef(false);
+
+  // Guided breathing phase tracking
+  const phaseRef = useRef<BreathPhase>("idle");
+  const phaseStartMsRef = useRef(0);
+  const inhaleAudioFramesRef = useRef(0);
+  const exhaleAudioFramesRef = useRef(0);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -158,42 +161,47 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       breathScore = Math.round(Math.max(mouthOnlyScore, audioOnlyScore) * 0.3);
     }
 
-    // Cycle counting: track mouth envelope but only count cycles
-    // where audio was heard during the peak phase
-    const mouthSignal = Math.min(1, normAperture * 1.8);
-    comboEmaRef.current = comboEmaRef.current * 0.88 + mouthSignal * 0.12;
-    const s = comboEmaRef.current;
+    // --- Guided breath phase detection ---
+    // Timed phases prompt inhale → exhale. Audio must be detected
+    // in BOTH phases for a cycle to count.
+    const INHALE_MS = 3500;
+    const EXHALE_MS = 3500;
+    const PAUSE_MS = 1500;
+    const AUDIO_PHASE_THRESHOLD = 0.15;
+    const MIN_PHASE_AUDIO = 12;
 
-    // Track whether audio was detected during the current peak buildup
-    if (currentVolume > 0.05) {
-      audioDetectedInPeakRef.current = true;
-    }
-
-    if (s < 0.085) {
-      belowLowFramesRef.current += 1;
-      if (belowLowFramesRef.current > 12) {
-        runningPeakRef.current = 0;
-        audioDetectedInPeakRef.current = false;
-      }
-    } else {
-      belowLowFramesRef.current = 0;
-      runningPeakRef.current = Math.max(runningPeakRef.current, s);
-    }
-
-    const peak = runningPeakRef.current;
     const now = performance.now();
-    if (
-      peak > 0.14 &&
-      s < peak * 0.44 &&
-      peak - s > 0.045 &&
-      now - lastCycleMsRef.current > 520 &&
-      audioDetectedInPeakRef.current // MUST have heard breath sounds
-    ) {
-      cyclesCompletedRef.current += 1;
-      lastCycleMsRef.current = now;
-      runningPeakRef.current = s;
-      audioDetectedInPeakRef.current = false;
+    if (phaseStartMsRef.current === 0) phaseStartMsRef.current = now;
+    const phaseElapsed = now - phaseStartMsRef.current;
+
+    if (phaseRef.current === "idle" && phaseElapsed >= PAUSE_MS) {
+      phaseRef.current = "inhale";
+      phaseStartMsRef.current = now;
+      inhaleAudioFramesRef.current = 0;
+    } else if (phaseRef.current === "inhale") {
+      if (currentVolume > AUDIO_PHASE_THRESHOLD) inhaleAudioFramesRef.current += 1;
+      if (phaseElapsed >= INHALE_MS) {
+        phaseRef.current = "exhale";
+        phaseStartMsRef.current = now;
+        exhaleAudioFramesRef.current = 0;
+      }
+    } else if (phaseRef.current === "exhale") {
+      if (currentVolume > AUDIO_PHASE_THRESHOLD) exhaleAudioFramesRef.current += 1;
+      if (phaseElapsed >= EXHALE_MS) {
+        if (inhaleAudioFramesRef.current >= MIN_PHASE_AUDIO &&
+            exhaleAudioFramesRef.current >= MIN_PHASE_AUDIO) {
+          cyclesCompletedRef.current += 1;
+        }
+        phaseRef.current = "idle";
+        phaseStartMsRef.current = now;
+      }
     }
+
+    const pe = now - phaseStartMsRef.current;
+    let phaseProgress = 0;
+    if (phaseRef.current === "idle") phaseProgress = Math.min(1, pe / PAUSE_MS);
+    else if (phaseRef.current === "inhale") phaseProgress = Math.min(1, pe / INHALE_MS);
+    else phaseProgress = Math.min(1, pe / EXHALE_MS);
 
     setCurrentStats({
       audioVolume: currentVolume,
@@ -203,6 +211,8 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       audioBreathScore: Math.round(audioOnlyScore),
       breathScore,
       cyclesCompleted: cyclesCompletedRef.current,
+      breathPhase: phaseRef.current,
+      phaseProgress,
     });
   }, [getRMSVolume]);
 
@@ -224,12 +234,11 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
   const startEngine = useCallback(
     async (stream: MediaStream) => {
       historyRef.current = [];
-      comboEmaRef.current = 0;
-      runningPeakRef.current = 0;
-      belowLowFramesRef.current = 0;
       cyclesCompletedRef.current = 0;
-      lastCycleMsRef.current = 0;
-      audioDetectedInPeakRef.current = false;
+      phaseRef.current = "idle";
+      phaseStartMsRef.current = 0;
+      inhaleAudioFramesRef.current = 0;
+      exhaleAudioFramesRef.current = 0;
       setCurrentStats((prev) => ({ ...prev, cyclesCompleted: 0 }));
 
       await initAudio(stream);

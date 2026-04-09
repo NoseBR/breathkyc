@@ -146,22 +146,23 @@ export default function BreathStep({ sessionId, onSuccess, onFail }: BreathStepP
       
       {status === "instructions" && (
         <div className="text-center py-6">
-          <Activity className="w-16 h-16 text-primary mx-auto mb-4" />
-          <h2 className="text-2xl font-bold mb-2 text-white">Breath Validation</h2>
-          <p className="text-zinc-400 text-sm mb-6 px-4">
-            We verify liveness using <strong className="text-zinc-200">both</strong> mouth movement and breath sounds.
-            Complete about <strong className="text-zinc-200">{BREATH_CYCLES_REQUIRED} slow breaths</strong> (breathe in,
-            then out — deep enough to move your lips or be heard on the mic).
+          <Activity className=”w-16 h-16 text-primary mx-auto mb-4” />
+          <h2 className=”text-2xl font-bold mb-2 text-white”>Breath Validation</h2>
+          <p className=”text-zinc-400 text-sm mb-6 px-4”>
+            Follow a guided breathing exercise: you&apos;ll be prompted to
+            <strong className=”text-zinc-200”> breathe IN</strong> and
+            <strong className=”text-zinc-200”> breathe OUT</strong> for {BREATH_CYCLES_REQUIRED} complete cycles.
+            Your breathing must be <strong className=”text-zinc-200”>audible to the microphone</strong>.
           </p>
-          <div className="bg-zinc-800 p-4 rounded-xl text-left mb-6 text-sm text-zinc-300">
-            <div className="flex items-center mb-2">
-              <Camera className="w-4 h-4 mr-2 text-primary" /> Mouth / lip motion (visual)
+          <div className=”bg-zinc-800 p-4 rounded-xl text-left mb-6 text-sm text-zinc-300”>
+            <div className=”flex items-center mb-2”>
+              <Camera className=”w-4 h-4 mr-2 text-primary” /> Face must be visible in frame
             </div>
-            <div className="flex items-center mb-2">
-              <Mic className="w-4 h-4 mr-2 text-accent" /> Microphone — breath sounds, exhale, light “ha”
+            <div className=”flex items-center mb-2”>
+              <Mic className=”w-4 h-4 mr-2 text-accent” /> Microphone must hear inhale and exhale
             </div>
-            <div className="flex items-center text-yellow-500 text-xs font-medium">
-              <Wind className="w-4 h-4 mr-2 shrink-0" /> Both channels are required to pass verification.
+            <div className=”flex items-center text-yellow-500 text-xs font-medium”>
+              <Wind className=”w-4 h-4 mr-2 shrink-0” /> Silent breathing will not be counted.
             </div>
           </div>
           <button
@@ -190,63 +191,113 @@ export default function BreathStep({ sessionId, onSuccess, onFail }: BreathStepP
 
       {status === "breathing" && (
         <div className="w-full flex flex-col items-center py-4">
-          <h2 className="text-xl font-bold mb-1 text-white">Breathe In & Out</h2>
-          <p className="text-zinc-400 text-sm mb-6 text-center px-2">
-            {engineReady
-              ? `In through the nose or mouth, then out through the mouth with a little sound — ${BREATH_CYCLES_REQUIRED} full cycles fill the ring.`
-              : "Starting camera and microphone..."}
-          </p>
-
-          {engineReady && (
-            <p className="text-primary/90 text-sm font-semibold mb-2">
-              Cycles: {currentStats.cyclesCompleted} / {BREATH_CYCLES_REQUIRED}
-            </p>
+          {/* Phase instructions */}
+          {!engineReady ? (
+            <h2 className="text-xl font-bold mb-4 text-white">Starting camera and microphone...</h2>
+          ) : currentStats.breathPhase === "idle" ? (
+            <div className="text-center mb-4">
+              <h2 className="text-2xl font-bold text-yellow-400 animate-pulse">Get Ready...</h2>
+              <p className="text-zinc-500 text-sm mt-1">Next breath coming up</p>
+            </div>
+          ) : currentStats.breathPhase === "inhale" ? (
+            <div className="text-center mb-4">
+              <h2 className="text-3xl font-black text-cyan-400">BREATHE IN</h2>
+              <p className="text-cyan-400/50 text-sm mt-1">Inhale deeply through your nose or mouth</p>
+            </div>
+          ) : (
+            <div className="text-center mb-4">
+              <h2 className="text-3xl font-black text-green-400">BREATHE OUT</h2>
+              <p className="text-green-400/50 text-sm mt-1">Exhale slowly — let the mic hear you</p>
+            </div>
           )}
 
-          <div className="relative w-48 h-48 mb-8 flex items-center justify-center">
-            {/* Glowing Microphone Indicator (Haptic scaling via audio) */}
-            <div 
-              className="absolute inset-0 bg-primary/20 rounded-full blur-2xl transition-all duration-[50ms]"
-              style={{ transform: `scale(${1 + currentStats.audioVolume * 2})` }}
+          {/* Phase progress bar */}
+          {engineReady && currentStats.breathPhase !== "idle" && (
+            <div className="w-full max-w-[200px] h-1.5 bg-zinc-800 rounded-full mb-6 overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all duration-100 ${
+                  currentStats.breathPhase === "inhale" ? "bg-cyan-400" : "bg-green-400"
+                }`}
+                style={{ width: `${currentStats.phaseProgress * 100}%` }}
+              />
+            </div>
+          )}
+
+          {/* Animated breathing circle with video */}
+          <div className="relative w-48 h-48 mb-6 flex items-center justify-center">
+            {/* Breathing glow — expands on inhale, contracts on exhale */}
+            <div
+              className={`absolute inset-0 rounded-full blur-2xl transition-all duration-200 ${
+                currentStats.breathPhase === "inhale"
+                  ? "bg-cyan-400/20"
+                  : currentStats.breathPhase === "exhale"
+                  ? "bg-green-400/20"
+                  : "bg-zinc-600/10"
+              }`}
+              style={{
+                transform: `scale(${
+                  currentStats.breathPhase === "inhale"
+                    ? 1 + currentStats.phaseProgress * 0.5
+                    : currentStats.breathPhase === "exhale"
+                    ? 1.5 - currentStats.phaseProgress * 0.5
+                    : 1
+                })`,
+              }}
             />
-            
-            {/* Face/Mouth Anchor Feed */}
-            <div className="relative w-40 h-40 bg-black rounded-full overflow-hidden border-4 border-zinc-800 z-10 transition-colors"
-                 style={{ borderColor: currentStats.breathScore > 50 ? '#00E5FF' : '#27272a' }}>
-              <video 
-                ref={videoRef} 
-                autoPlay 
-                playsInline 
-                muted 
+
+            {/* Video circle */}
+            <div
+              className="relative w-40 h-40 bg-black rounded-full overflow-hidden border-4 z-10 transition-all duration-200"
+              style={{
+                borderColor:
+                  currentStats.breathPhase === "inhale"
+                    ? "#22d3ee"
+                    : currentStats.breathPhase === "exhale"
+                    ? "#4ade80"
+                    : "#27272a",
+                transform: `scale(${
+                  currentStats.breathPhase === "inhale"
+                    ? 1 + currentStats.phaseProgress * 0.08
+                    : currentStats.breathPhase === "exhale"
+                    ? 1.08 - currentStats.phaseProgress * 0.08
+                    : 1
+                })`,
+              }}
+            >
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
                 className="absolute inset-0 w-full h-full object-cover scale-x-[-1]"
               />
-              <canvas 
-                ref={canvasRef} 
-                width={160} 
-                height={160} 
+              <canvas
+                ref={canvasRef}
+                width={160}
+                height={160}
                 className="absolute inset-0 z-20 scale-x-[-1] opacity-80"
               />
-               {/* Aperture Tracker Visual */}
-               <div 
-                 className="absolute bottom-4 left-1/2 -translate-x-1/2 w-8 bg-accent/80 rounded transition-all duration-75"
-                 style={{ height: `${currentStats.mouthAperture * 100}%` }}
-               />
             </div>
 
             {/* Completion Ring */}
             <svg className="absolute inset-0 w-full h-full -rotate-90 pointer-events-none z-30">
-              <circle 
-                cx="96" cy="96" r="90" 
-                fill="none" stroke="#27272a" strokeWidth="8"
-              />
-              <circle 
-                cx="96" cy="96" r="90" 
-                fill="none" stroke="#00E5FF" strokeWidth="8"
+              <circle cx="96" cy="96" r="90" fill="none" stroke="#27272a" strokeWidth="8" />
+              <circle
+                cx="96"
+                cy="96"
+                r="90"
+                fill="none"
+                stroke={
+                  currentStats.breathPhase === "inhale"
+                    ? "#22d3ee"
+                    : currentStats.breathPhase === "exhale"
+                    ? "#4ade80"
+                    : "#00E5FF"
+                }
+                strokeWidth="8"
                 strokeDasharray="565"
                 strokeDashoffset={
-                  565 -
-                  565 *
-                    Math.min(1, currentStats.cyclesCompleted / BREATH_CYCLES_REQUIRED)
+                  565 - 565 * Math.min(1, currentStats.cyclesCompleted / BREATH_CYCLES_REQUIRED)
                 }
                 strokeLinecap="round"
                 className="transition-all duration-300"
@@ -254,46 +305,44 @@ export default function BreathStep({ sessionId, onSuccess, onFail }: BreathStepP
             </svg>
           </div>
 
-          <div className="w-full bg-zinc-800 p-3 rounded-xl space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex flex-col min-w-0">
-                <span className="text-xs text-zinc-400 uppercase tracking-widest">Combined</span>
-                <span className="text-lg font-bold text-primary font-mono">
-                  {Math.round(currentStats.breathScore)}%
-                </span>
-              </div>
-              {errorMSG ? (
-                <span className="text-xs text-error text-right">{errorMSG}</span>
-              ) : (
-                <div className="flex gap-0.5 items-end h-10">
-                  {[1, 2, 3, 4, 5, 6].map((i) => (
-                    <div
-                      key={i}
-                      className="w-1.5 bg-accent/50 rounded-t"
-                      style={{
-                        height: `${8 + currentStats.audioVolume * 36 * (i / 6)}px`,
-                        opacity: currentStats.audioVolume > i / 12 ? 1 : 0.25,
-                      }}
-                    />
-                  ))}
-                </div>
-              )}
+          {/* Sound detection indicator */}
+          {engineReady && (
+            <div className="flex items-center gap-2 mb-4">
+              <div
+                className={`w-2.5 h-2.5 rounded-full transition-colors ${
+                  currentStats.audioVolume > 0.15
+                    ? "bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.6)]"
+                    : "bg-zinc-600"
+                }`}
+              />
+              <span
+                className={`text-sm ${
+                  currentStats.audioVolume > 0.15 ? "text-green-400" : "text-zinc-500"
+                }`}
+              >
+                {currentStats.audioVolume > 0.15 ? "Breath sound detected" : "Listening for breath..."}
+              </span>
             </div>
-            <div className="grid grid-cols-3 gap-2 text-center text-[10px] text-zinc-500 uppercase tracking-wide">
-              <div>
-                <div className="text-zinc-400">Mouth</div>
-                <div className="text-white font-mono">{Math.round(currentStats.mouthBreathScore)}</div>
-              </div>
-              <div>
-                <div className="text-zinc-400">Sound</div>
-                <div className="text-white font-mono">{Math.round(currentStats.audioBreathScore)}</div>
-              </div>
-              <div>
-                <div className="text-zinc-400">Sync</div>
-                <div className="text-white font-mono">{Math.round(currentStats.syncScore)}</div>
-              </div>
+          )}
+
+          {/* Cycle indicators */}
+          {engineReady && (
+            <div className="flex gap-3 items-center justify-center">
+              {Array.from({ length: BREATH_CYCLES_REQUIRED }, (_, i) => (
+                <div
+                  key={i}
+                  className={`w-3.5 h-3.5 rounded-full border-2 transition-all ${
+                    i < currentStats.cyclesCompleted
+                      ? "bg-cyan-400 border-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.5)]"
+                      : "bg-transparent border-zinc-600"
+                  }`}
+                />
+              ))}
+              <span className="text-zinc-400 text-sm ml-2">
+                {currentStats.cyclesCompleted} / {BREATH_CYCLES_REQUIRED} cycles
+              </span>
             </div>
-          </div>
+          )}
         </div>
       )}
 
