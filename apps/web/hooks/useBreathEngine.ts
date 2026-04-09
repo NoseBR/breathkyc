@@ -51,6 +51,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
   const lastCycleMsRef = useRef(0);
   const requestRef = useRef<number>(0);
   const lastVideoTimeRef = useRef<number>(-1);
+  const audioDetectedInPeakRef = useRef(false);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -157,18 +158,22 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       breathScore = Math.round(Math.max(mouthOnlyScore, audioOnlyScore) * 0.3);
     }
 
-    // Envelope for cycle counting: requires BOTH mouth and audio signal
-    const bothActive = normAperture > 0.03 && currentVolume > 0.05;
-    const envelope = bothActive
-      ? Math.min(1, (normAperture * 0.5 + currentVolume * 0.5) * 1.8)
-      : 0;
-    comboEmaRef.current = comboEmaRef.current * 0.88 + envelope * 0.12;
+    // Cycle counting: track mouth envelope but only count cycles
+    // where audio was heard during the peak phase
+    const mouthSignal = Math.min(1, normAperture * 1.8);
+    comboEmaRef.current = comboEmaRef.current * 0.88 + mouthSignal * 0.12;
     const s = comboEmaRef.current;
+
+    // Track whether audio was detected during the current peak buildup
+    if (currentVolume > 0.05) {
+      audioDetectedInPeakRef.current = true;
+    }
 
     if (s < 0.085) {
       belowLowFramesRef.current += 1;
       if (belowLowFramesRef.current > 12) {
         runningPeakRef.current = 0;
+        audioDetectedInPeakRef.current = false;
       }
     } else {
       belowLowFramesRef.current = 0;
@@ -181,11 +186,13 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       peak > 0.14 &&
       s < peak * 0.44 &&
       peak - s > 0.045 &&
-      now - lastCycleMsRef.current > 520
+      now - lastCycleMsRef.current > 520 &&
+      audioDetectedInPeakRef.current // MUST have heard breath sounds
     ) {
       cyclesCompletedRef.current += 1;
       lastCycleMsRef.current = now;
       runningPeakRef.current = s;
+      audioDetectedInPeakRef.current = false;
     }
 
     setCurrentStats({
@@ -222,6 +229,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       belowLowFramesRef.current = 0;
       cyclesCompletedRef.current = 0;
       lastCycleMsRef.current = 0;
+      audioDetectedInPeakRef.current = false;
       setCurrentStats((prev) => ({ ...prev, cyclesCompleted: 0 }));
 
       await initAudio(stream);
