@@ -1,0 +1,1 @@
+{"version":3,"file":"webhook.d.ts","sourceRoot":"","sources":["../../src/utils/webhook.ts"],"names":[],"mappings":"AAAA,UAAU,cAAc;IACtB,SAAS,EAAE,MAAM,CAAC;IAClB,MAAM,EAAE,MAAM,CAAC;IACf,YAAY,EAAE,MAAM,GAAG,IAAI,CAAC;IAC5B,WAAW,EAAE,MAAM,GAAG,IAAI,CAAC;CAC5B;AAKD,wBAAsB,eAAe,CACnC,UAAU,EAAE,MAAM,EAClB,OAAO,EAAE,cAAc,GACtB,OAAO,CAAC,OAAO,CAAC,CAgClB"}
