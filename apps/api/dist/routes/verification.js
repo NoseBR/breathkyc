@@ -7,9 +7,12 @@ exports.verificationRouter = void 0;
 const express_1 = require("express");
 const multer_1 = __importDefault(require("multer"));
 const zod_1 = require("zod");
+const fs_1 = __importDefault(require("fs"));
 const prisma_1 = require("../utils/prisma");
 const encryption_1 = require("../utils/encryption");
 const rateLimit_1 = require("../middleware/rateLimit");
+const tesseractOcr_1 = require("../services/ocr/tesseractOcr");
+const brazilIdParse_1 = require("../lib/brazilIdParse");
 const router = (0, express_1.Router)();
 exports.verificationRouter = router;
 const upload = (0, multer_1.default)({ dest: "uploads/", limits: { fileSize: 10 * 1024 * 1024 } });
@@ -125,25 +128,30 @@ router.post("/document", upload.single("document"), async (req, res) => {
             res.status(404).json({ error: "Session not found" });
             return;
         }
-        // MVP: Return mock OCR data. Real OCR (Google Vision / Textract) in Phase B.
-        const mockData = {
-            name: "João da Silva",
-            cpf: "123.456.789-09",
-            dateOfBirth: "1990-05-15",
-            documentNumber: "1234567890",
-            ocrConfidence: 0.87,
+        // Read uploaded file into a buffer for Tesseract OCR
+        const imageBuffer = fs_1.default.readFileSync(req.file.path);
+        const ocrResult = await (0, tesseractOcr_1.runTesseractOcrWithBestOrientation)(imageBuffer);
+        const parsed = (0, brazilIdParse_1.parseBrazilianIdFields)(ocrResult.text);
+        const ocrData = {
+            name: parsed.name,
+            cpf: parsed.cpf,
+            dateOfBirth: parsed.dateOfBirth,
+            documentNumber: parsed.documentNumber,
+            ocrConfidence: ocrResult.confidence / 100, // normalize to 0-1
         };
         await prisma_1.prisma.verification.update({
             where: { sessionId },
             data: {
                 documentResult: {
                     documentType,
-                    ...mockData,
+                    ...ocrData,
+                    ocrText: ocrResult.text,
+                    orientationDegrees: ocrResult.orientationDegrees,
                     imagePath: req.file.path,
                 },
             },
         });
-        res.json(mockData);
+        res.json(ocrData);
     }
     catch (err) {
         console.error("[verify/document]", err);
