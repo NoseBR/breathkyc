@@ -146,23 +146,23 @@ export default function BreathStep({ sessionId, onSuccess, onFail }: BreathStepP
       
       {status === "instructions" && (
         <div className="text-center py-6">
-          <Activity className=”w-16 h-16 text-primary mx-auto mb-4” />
-          <h2 className=”text-2xl font-bold mb-2 text-white”>Breath Validation</h2>
-          <p className=”text-zinc-400 text-sm mb-6 px-4”>
+          <Activity className="w-16 h-16 text-primary mx-auto mb-4" />
+          <h2 className="text-2xl font-bold mb-2 text-white">Breath Validation</h2>
+          <p className="text-zinc-400 text-sm mb-6 px-4">
             Follow a guided breathing exercise: you&apos;ll be prompted to
-            <strong className=”text-zinc-200”> breathe IN</strong> and
-            <strong className=”text-zinc-200”> breathe OUT</strong> for {BREATH_CYCLES_REQUIRED} complete cycles.
-            Your breathing must be <strong className=”text-zinc-200”>audible to the microphone</strong>.
+            <strong className="text-zinc-200"> breathe IN</strong> and
+            <strong className="text-zinc-200"> breathe OUT</strong> for {BREATH_CYCLES_REQUIRED} complete cycles.
+            Your breathing must be <strong className="text-zinc-200">audible to the microphone</strong>.
           </p>
-          <div className=”bg-zinc-800 p-4 rounded-xl text-left mb-6 text-sm text-zinc-300”>
-            <div className=”flex items-center mb-2”>
-              <Camera className=”w-4 h-4 mr-2 text-primary” /> Face must be visible in frame
+          <div className="bg-zinc-800 p-4 rounded-xl text-left mb-6 text-sm text-zinc-300">
+            <div className="flex items-center mb-2">
+              <Camera className="w-4 h-4 mr-2 text-primary" /> Face must be visible in frame
             </div>
-            <div className=”flex items-center mb-2”>
-              <Mic className=”w-4 h-4 mr-2 text-accent” /> Microphone must hear inhale and exhale
+            <div className="flex items-center mb-2">
+              <Mic className="w-4 h-4 mr-2 text-accent" /> Microphone must hear inhale and exhale
             </div>
-            <div className=”flex items-center text-yellow-500 text-xs font-medium”>
-              <Wind className=”w-4 h-4 mr-2 shrink-0” /> Silent breathing will not be counted.
+            <div className="flex items-center text-yellow-500 text-xs font-medium">
+              <Wind className="w-4 h-4 mr-2 shrink-0" /> Silent breathing will not be counted.
             </div>
           </div>
           <button
@@ -310,17 +310,17 @@ export default function BreathStep({ sessionId, onSuccess, onFail }: BreathStepP
             <div className="flex items-center gap-2 mb-4">
               <div
                 className={`w-2.5 h-2.5 rounded-full transition-colors ${
-                  currentStats.audioVolume > 0.15
+                  currentStats.breathingDetected
                     ? "bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.6)]"
                     : "bg-zinc-600"
                 }`}
               />
               <span
                 className={`text-sm ${
-                  currentStats.audioVolume > 0.15 ? "text-green-400" : "text-zinc-500"
+                  currentStats.breathingDetected ? "text-green-400" : "text-zinc-500"
                 }`}
               >
-                {currentStats.audioVolume > 0.15 ? "Breath sound detected" : "Listening for breath..."}
+                {currentStats.breathingDetected ? "Breath sound detected" : "Listening for breath..."}
               </span>
             </div>
           )}
