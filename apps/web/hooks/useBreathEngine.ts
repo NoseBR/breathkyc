@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { getFaceLandmarker } from "../lib/mediapipe";
+import { classifyBreath, loadBreathClassifier, type BreathClass } from "../lib/breathClassifier";
 import type { FaceLandmarkerResult } from "@mediapipe/tasks-vision";
 
-/** Full in–out cycles required to complete the breath step UI (~2–3 deep breaths) */
+/** Full in–out cycles required to complete the breath step UI */
 export const BREATH_CYCLES_REQUIRED = 3;
 
 export type BreathPhase = "idle" | "inhale" | "exhale";
@@ -18,9 +19,7 @@ export interface BreathStats {
   breathScore: number;
   cyclesCompleted: number;
   breathPhase: BreathPhase;
-  /** 0–1 progress through the current phase */
   phaseProgress: number;
-  /** Real-time: is the current audio loud enough to be breathing? */
   breathingDetected: boolean;
 }
 
@@ -31,23 +30,23 @@ function variance(arr: number[]): number {
 }
 
 /**
- * Checks whether a phase had real breathing by comparing breath-band energy
- * (200-2000Hz) against the idle baseline measured just before this phase.
- * Mouth opening adds ZERO energy to any frequency band → ratio ≈ 1.0 → always fails.
+ * Checks whether a guided phase had real breathing using ML classifications.
+ * Each classification is "inhale", "exhale", or "silence".
+ * Phase is valid if enough classifications match the expected breath type.
  */
-function isPhaseValid(energies: number[], idleAvg: number): boolean {
-  if (energies.length < 20) return false;
+function isPhaseValidML(
+  classifications: BreathClass[],
+  expectedType: "inhale" | "exhale"
+): boolean {
+  if (classifications.length < 2) return false;
 
-  const avg = energies.reduce((a, b) => a + b, 0) / energies.length;
-  const peak = Math.max(...energies);
+  const breathCount = classifications.filter(
+    (c) => c === expectedType
+  ).length;
+  const ratio = breathCount / classifications.length;
 
-  // Breathing must increase energy in the 200-2000Hz band above idle.
-  // Mouth opening cannot create energy → ratio = 1.0 → FAIL.
-  const baseline = Math.max(idleAvg, 0.01);
-  if (avg / baseline < 1.4) return false;  // avg must be 1.4× idle
-  if (peak / baseline < 1.8) return false; // peak must be 1.8× idle
-
-  return true;
+  // At least 40% of classifications must match the expected type
+  return ratio >= 0.40;
 }
 
 export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | null>) {
@@ -76,88 +75,106 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
   // Guided breathing phase tracking
   const phaseRef = useRef<BreathPhase>("idle");
   const phaseStartMsRef = useRef(0);
-  const inhaleVolumesRef = useRef<number[]>([]);
-  const exhaleVolumesRef = useRef<number[]>([]);
 
-  // Idle baseline — recalculated every idle phase for comparison
-  const idleVolumesRef = useRef<number[]>([]);
-  const idleAvgRef = useRef(0);
+  // ML classification results collected during each phase
+  const inhaleClassesRef = useRef<BreathClass[]>([]);
+  const exhaleClassesRef = useRef<BreathClass[]>([]);
 
+  // Latest ML classification result (updated every ~250ms)
+  const latestClassRef = useRef<BreathClass>("silence");
+  const latestConfidenceRef = useRef(0);
+  const classifierActiveRef = useRef(false);
+
+  // Audio pipeline refs
   const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const freqDataRef = useRef<Uint8Array | null>(null);
-  // Tracks whether the mic ever produced real frequency data
-  const audioActiveRef = useRef(false);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const audioChunksRef = useRef<Float32Array[]>([]);
+  const classifyTimerRef = useRef<number>(0);
 
+  /**
+   * Initialize audio pipeline: ScriptProcessorNode collects raw samples
+   * for ML classification (no AnalyserNode, no volume thresholds).
+   */
   const initAudio = useCallback(async (stream: MediaStream) => {
     try {
       const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
       const source = audioCtx.createMediaStreamSource(stream);
 
-      // High-pass filter removes mic self-noise, AGC artifacts, and low-freq hum
-      const highpass = audioCtx.createBiquadFilter();
-      highpass.type = "highpass";
-      highpass.frequency.value = 85;
-      highpass.Q.value = 0.7;
+      // ScriptProcessorNode collects raw PCM audio for ML inference
+      const bufferSize = 4096;
+      const processor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
 
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 512;
-      analyser.smoothingTimeConstant = 0.35;
-      source.connect(highpass);
-      highpass.connect(analyser);
+      processor.onaudioprocess = (e: AudioProcessingEvent) => {
+        const input = e.inputBuffer.getChannelData(0);
+        audioChunksRef.current.push(new Float32Array(input));
+        // Keep max 2 seconds of audio chunks
+        const maxChunks = Math.ceil((audioCtx.sampleRate * 2) / bufferSize);
+        while (audioChunksRef.current.length > maxChunks) {
+          audioChunksRef.current.shift();
+        }
+      };
 
-      // iOS Safari: AudioContext starts suspended unless resumed after user gesture
+      source.connect(processor);
+      // Silent output to keep processor alive
+      const silentGain = audioCtx.createGain();
+      silentGain.gain.value = 0;
+      processor.connect(silentGain);
+      silentGain.connect(audioCtx.destination);
+
       if (audioCtx.state === "suspended") {
         await audioCtx.resume();
       }
 
       audioContextRef.current = audioCtx;
-      analyserRef.current = analyser;
-      freqDataRef.current = new Uint8Array(analyser.frequencyBinCount);
+      processorRef.current = processor;
     } catch (e) {
-      console.error("Audio Context Init Failed:", e);
+      console.error("Audio Init Failed:", e);
     }
   }, []);
 
   /**
-   * Computes average energy in the 200-2000 Hz band from frequency domain data.
-   * Breathing produces broadband energy in this range.
-   * Mouth opening without sound creates ZERO energy — physically impossible.
-   * Returns 0-1 normalized band energy (dB-scaled byte avg / 255).
+   * Start the ML classification loop — runs every 250ms.
+   * Takes the last 0.25s of audio, computes MFCCs, runs ONNX model.
    */
-  const getBreathBandEnergy = useCallback(() => {
-    const analyser = analyserRef.current;
-    const freqData = freqDataRef.current;
-    if (!analyser || !freqData) return 0;
+  const startClassificationLoop = useCallback(() => {
+    classifyTimerRef.current = window.setInterval(async () => {
+      const sampleRate = audioContextRef.current?.sampleRate || 44100;
+      const samplesNeeded = Math.floor(sampleRate * 0.25);
+      const chunks = audioChunksRef.current;
 
-    analyser.getByteFrequencyData(freqData as Uint8Array<ArrayBuffer>);
+      // Check if we have enough audio
+      const totalSamples = chunks.reduce((s, c) => s + c.length, 0);
+      if (totalSamples < samplesNeeded) return;
 
-    const sampleRate = audioContextRef.current?.sampleRate || 44100;
-    const binWidth = sampleRate / analyser.fftSize;
-    const minBin = Math.floor(200 / binWidth);
-    const maxBin = Math.ceil(2000 / binWidth);
-
-    let bandSum = 0;
-    let bandCount = 0;
-    let totalEnergy = 0;
-    for (let i = 0; i < freqData.length; i++) {
-      totalEnergy += freqData[i]!;
-      if (i >= minBin && i <= maxBin) {
-        bandSum += freqData[i]!;
-        bandCount++;
+      // Extract last 0.25s of mono audio
+      const combined = new Float32Array(samplesNeeded);
+      let writePos = samplesNeeded;
+      for (let i = chunks.length - 1; i >= 0 && writePos > 0; i--) {
+        const chunk = chunks[i]!;
+        const copyLen = Math.min(chunk.length, writePos);
+        combined.set(chunk.subarray(chunk.length - copyLen), writePos - copyLen);
+        writePos -= copyLen;
       }
-    }
 
-    // Mark audio as active if any frequency data is present
-    if (totalEnergy > freqData.length * 2) audioActiveRef.current = true;
-
-    return bandCount > 0 ? (bandSum / bandCount) / 255 : 0;
+      try {
+        const result = await classifyBreath(combined, sampleRate);
+        latestClassRef.current = result.label;
+        latestConfidenceRef.current = result.confidence;
+        classifierActiveRef.current = true;
+      } catch (e) {
+        console.error("[BreathEngine] Classification error:", e);
+      }
+    }, 250);
   }, []);
 
   const calculateSync = useCallback((results: FaceLandmarkerResult) => {
-    // PRIMARY DETECTION: energy in 200-2000 Hz breath band (frequency domain).
-    // This completely ignores time-domain volume — only spectral energy matters.
-    const bandEnergy = getBreathBandEnergy();
+    const mlClass = latestClassRef.current;
+    const mlConfidence = latestConfidenceRef.current;
+
+    // Convert ML class to a 0-1 "breath signal" for scoring
+    const breathSignal = mlClass === "inhale" || mlClass === "exhale"
+      ? mlConfidence
+      : 0;
 
     let mouthAperture = 0;
     const marks = results.faceLandmarks?.[0] as { x: number; y: number }[] | undefined;
@@ -171,7 +188,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
 
     const normAperture = Math.min(mouthAperture * 20, 1);
 
-    historyRef.current.push({ vol: bandEnergy, mouth: normAperture });
+    historyRef.current.push({ vol: breathSignal, mouth: normAperture });
     if (historyRef.current.length > 100) historyRef.current.shift();
 
     const len = historyRef.current.length;
@@ -187,7 +204,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     let audioOnlyScore = 0;
 
     if (len > 35) {
-      const audibleBreath = maxV > 0.06;
+      const audibleBreath = maxV > 0.3;
       const mouthMotion = maxM > 0.042;
 
       if (mouthMotion) {
@@ -220,9 +237,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       breathScore = Math.round(Math.max(mouthOnlyScore, audioOnlyScore) * 0.3);
     }
 
-    // --- Guided breath phase detection ---
-    // Each phase collects all volume readings. At phase end, statistical
-    // analysis determines if real breathing occurred (avg, peak, stddev).
+    // --- Guided breath phase detection using ML classifications ---
     const INHALE_MS = 3500;
     const EXHALE_MS = 3500;
     const PAUSE_MS = 2000;
@@ -231,44 +246,55 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     if (phaseStartMsRef.current === 0) phaseStartMsRef.current = now;
     const phaseElapsed = now - phaseStartMsRef.current;
 
-    // Collect idle band energy for baseline comparison
-    if (phaseRef.current === "idle") {
-      idleVolumesRef.current.push(bandEnergy);
-    }
-
-    // Real-time indicator: band energy must be notably above idle baseline
-    const isBreathDetected = idleAvgRef.current > 0
-      ? bandEnergy > idleAvgRef.current * 1.4
-      : bandEnergy > 0.20;
+    // Real-time indicator: ML model says breathing is happening
+    const isBreathDetected = mlClass === "inhale" || mlClass === "exhale";
 
     if (phaseRef.current === "idle" && phaseElapsed >= PAUSE_MS) {
-      // Compute idle baseline from this idle period
-      const samples = idleVolumesRef.current;
-      if (samples.length > 5) {
-        idleAvgRef.current = samples.reduce((a, b) => a + b, 0) / samples.length;
-      }
       phaseRef.current = "inhale";
       phaseStartMsRef.current = now;
-      inhaleVolumesRef.current = [];
-      idleVolumesRef.current = [];
+      inhaleClassesRef.current = [];
     } else if (phaseRef.current === "inhale") {
-      inhaleVolumesRef.current.push(bandEnergy);
+      // Collect ML classifications during inhale phase (sampled at ~60fps but ML updates at 4Hz)
+      inhaleClassesRef.current.push(mlClass);
       if (phaseElapsed >= INHALE_MS) {
         phaseRef.current = "exhale";
         phaseStartMsRef.current = now;
-        exhaleVolumesRef.current = [];
+        exhaleClassesRef.current = [];
       }
     } else if (phaseRef.current === "exhale") {
-      exhaleVolumesRef.current.push(bandEnergy);
+      exhaleClassesRef.current.push(mlClass);
       if (phaseElapsed >= EXHALE_MS) {
-        // Compare breathing audio against the idle baseline from just before.
-        // HARD BLOCK: if mic never produced data, never count a cycle.
-        const idle = idleAvgRef.current;
-        const inhaleOk = isPhaseValid(inhaleVolumesRef.current, idle);
-        const exhaleOk = isPhaseValid(exhaleVolumesRef.current, idle);
-        if (audioActiveRef.current && inhaleOk && exhaleOk) {
-          cyclesCompletedRef.current += 1;
+        // ML-based validation: check if the model detected breathing during each phase.
+        // Deduplicate: since calculateSync runs at 60fps but ML updates at 4Hz,
+        // we get ~14 classifications per 3.5s phase from the ML model.
+        // The same classification is repeated across ~15 frames. Deduplicate by
+        // sampling every ~15th entry.
+        const dedup = (arr: BreathClass[]) => {
+          const step = Math.max(1, Math.floor(arr.length / 14));
+          const result: BreathClass[] = [];
+          for (let i = 0; i < arr.length; i += step) result.push(arr[i]!);
+          return result;
+        };
+
+        const inhaleDeduped = dedup(inhaleClassesRef.current);
+        const exhaleDeduped = dedup(exhaleClassesRef.current);
+
+        const inhaleOk = isPhaseValidML(inhaleDeduped, "inhale");
+        const exhaleOk = isPhaseValidML(exhaleDeduped, "exhale");
+
+        if (classifierActiveRef.current && (inhaleOk || exhaleOk)) {
+          // Accept if EITHER phase detected breathing (user may breathe
+          // through nose on inhale and mouth on exhale, or vice versa)
+          // but at least ONE phase must have ML-confirmed breathing.
+          const bothPhases = inhaleOk && exhaleOk;
+          const anyBreath = inhaleDeduped.some(c => c !== "silence") &&
+                           exhaleDeduped.some(c => c !== "silence");
+
+          if (bothPhases || anyBreath) {
+            cyclesCompletedRef.current += 1;
+          }
         }
+
         phaseRef.current = "idle";
         phaseStartMsRef.current = now;
       }
@@ -281,7 +307,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     else phaseProgress = Math.min(1, pe / EXHALE_MS);
 
     setCurrentStats({
-      audioVolume: bandEnergy,
+      audioVolume: breathSignal,
       mouthAperture: normAperture,
       syncScore: Math.round(syncCorrelationScore),
       mouthBreathScore: Math.round(mouthOnlyScore),
@@ -292,13 +318,12 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       phaseProgress,
       breathingDetected: isBreathDetected,
     });
-  }, [getBreathBandEnergy]);
+  }, []);
 
   const predictLoop = useCallback(async () => {
     const video = videoRef.current;
     if (video && video.readyState >= 2) {
       const landmarker = await getFaceLandmarker();
-
       const startTimeMs = performance.now();
       if (lastVideoTimeRef.current !== video.currentTime) {
         lastVideoTimeRef.current = video.currentTime;
@@ -315,23 +340,35 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       cyclesCompletedRef.current = 0;
       phaseRef.current = "idle";
       phaseStartMsRef.current = 0;
-      inhaleVolumesRef.current = [];
-      exhaleVolumesRef.current = [];
-      idleVolumesRef.current = [];
-      idleAvgRef.current = 0;
-      audioActiveRef.current = false;
+      inhaleClassesRef.current = [];
+      exhaleClassesRef.current = [];
+      audioChunksRef.current = [];
+      latestClassRef.current = "silence";
+      latestConfidenceRef.current = 0;
+      classifierActiveRef.current = false;
       setCurrentStats((prev) => ({ ...prev, cyclesCompleted: 0 }));
 
-      await initAudio(stream);
-      await getFaceLandmarker();
+      // Load ML model + audio + face in parallel
+      await Promise.all([
+        loadBreathClassifier(),
+        initAudio(stream),
+        getFaceLandmarker(),
+      ]);
+
       setEngineReady(true);
+      startClassificationLoop();
       requestRef.current = requestAnimationFrame(predictLoop);
     },
-    [initAudio, predictLoop]
+    [initAudio, predictLoop, startClassificationLoop]
   );
 
   const stopEngine = useCallback(() => {
     if (requestRef.current) cancelAnimationFrame(requestRef.current);
+    if (classifyTimerRef.current) clearInterval(classifyTimerRef.current);
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
     if (audioContextRef.current?.state !== "closed") {
       void audioContextRef.current?.close();
     }
