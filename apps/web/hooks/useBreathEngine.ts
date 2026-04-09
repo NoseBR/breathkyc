@@ -92,6 +92,8 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
   const dataArrayRef = useRef<Uint8Array | null>(null);
   const freqDataRef = useRef<Uint8Array | null>(null);
   const prevSpectrumRef = useRef<Float32Array | null>(null);
+  // Tracks whether the mic ever produced real audio — blocks cycles if audio is dead
+  const audioActiveRef = useRef(false);
 
   const initAudio = useCallback(async (stream: MediaStream) => {
     try {
@@ -109,6 +111,11 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       analyser.smoothingTimeConstant = 0.35;
       source.connect(highpass);
       highpass.connect(analyser);
+
+      // iOS Safari: AudioContext starts suspended unless resumed after user gesture
+      if (audioCtx.state === "suspended") {
+        await audioCtx.resume();
+      }
 
       audioContextRef.current = audioCtx;
       analyserRef.current = analyser;
@@ -166,6 +173,9 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
   const calculateSync = useCallback((results: FaceLandmarkerResult) => {
     const currentVolume = getRMSVolume();
     const spectralFlux = getSpectralFlux();
+
+    // Track whether the microphone is actually producing audio data
+    if (currentVolume > 0.01) audioActiveRef.current = true;
 
     // Gate volume by spectral flux — static mic noise has near-zero flux,
     // so breathSignal ≈ 0 even if volume is high. Real breathing has high flux.
@@ -272,11 +282,12 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     } else if (phaseRef.current === "exhale") {
       exhaleVolumesRef.current.push(breathSignal);
       if (phaseElapsed >= EXHALE_MS) {
-        // Compare breathing audio against the idle baseline from just before
+        // Compare breathing audio against the idle baseline from just before.
+        // HARD BLOCK: if mic never produced data, never count a cycle.
         const idle = idleAvgRef.current;
         const inhaleOk = isPhaseValid(inhaleVolumesRef.current, idle);
         const exhaleOk = isPhaseValid(exhaleVolumesRef.current, idle);
-        if (inhaleOk && exhaleOk) {
+        if (audioActiveRef.current && inhaleOk && exhaleOk) {
           cyclesCompletedRef.current += 1;
         }
         phaseRef.current = "idle";
@@ -330,6 +341,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       idleVolumesRef.current = [];
       idleAvgRef.current = 0;
       prevSpectrumRef.current = null;
+      audioActiveRef.current = false;
       setCurrentStats((prev) => ({ ...prev, cyclesCompleted: 0 }));
 
       await initAudio(stream);
