@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import GeolocationStep from "./components/GeolocationStep";
-import DocumentStep from "./components/DocumentStep";
 import FacialStep from "./components/FacialStep";
 import BreathStep from "./components/BreathStep";
 import ProgressBar from "./components/ProgressBar";
@@ -10,7 +9,7 @@ import InsecureContextBanner from "./components/InsecureContextBanner";
 import { apiPost } from "../../lib/api";
 import { Loader2, ShieldX, CheckCircle } from "lucide-react";
 
-type StepState = "geolocation" | "document" | "face" | "breath" | "complete" | "failed";
+type StepState = "geolocation" | "face" | "breath" | "complete" | "failed";
 
 export default function VerifyPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -69,21 +68,13 @@ export default function VerifyPage() {
           <ProgressBar currentStep={currentStep} />
         )}
 
-        {(currentStep === "document" || currentStep === "face" || currentStep === "breath") && (
+        {(currentStep === "face" || currentStep === "breath") && (
           <InsecureContextBanner />
         )}
 
         {/* Steps */}
         {currentStep === "geolocation" && (
           <GeolocationStep
-            sessionId={sessionId}
-            onSuccess={() => setCurrentStep("document")}
-            onFail={handleFail}
-          />
-        )}
-
-        {currentStep === "document" && (
-          <DocumentStep
             sessionId={sessionId}
             onSuccess={() => setCurrentStep("face")}
             onFail={handleFail}

@@ -4,7 +4,6 @@ import { motion } from "framer-motion";
 
 const STEPS = [
   { key: "geolocation", label: "Location" },
-  { key: "document", label: "Document" },
   { key: "face", label: "Face" },
   { key: "breath", label: "Breath" },
 ];
