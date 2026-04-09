@@ -16,7 +16,7 @@ export interface BreathStats {
   mouthBreathScore: number;
   /** Audio-only: breath sounds / airflow without requiring mouth sync */
   audioBreathScore: number;
-  /** max(sync, mouth, audio) — pass if any modality is strong */
+  /** Combined score — requires BOTH mouth and audio to pass */
   breathScore: number;
   /** Completed deep breath cycles (peak → valley on mouth and/or volume envelope) */
   cyclesCompleted: number;
@@ -130,7 +130,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
         audioOnlyScore = Math.min(100, 28 + vV * 11000 + maxV * 100);
       }
 
-      if (mouthMotion || audibleBreath) {
+      if (mouthMotion && audibleBreath) {
         let varianceSum = 0;
         historyRef.current.forEach((point) => {
           varianceSum += Math.abs(point.vol - point.mouth);
@@ -139,17 +139,29 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
         syncCorrelationScore = Math.max(0, Math.min(100, 100 - avgDiff * 135));
       }
 
-      setIsBreathing(mouthMotion || audibleBreath);
+      // Both modalities must be present
+      setIsBreathing(mouthMotion && audibleBreath);
     } else {
       setIsBreathing(false);
     }
 
-    const breathScore = Math.round(
-      Math.max(syncCorrelationScore, mouthOnlyScore * 0.96, audioOnlyScore * 0.96)
-    );
+    // Require BOTH mouth and audio — single modality alone fails
+    let breathScore: number;
+    if (mouthOnlyScore > 0 && audioOnlyScore > 0) {
+      // Both present: use sync if strong, otherwise weighted average of both
+      breathScore = Math.round(
+        Math.max(syncCorrelationScore, (mouthOnlyScore * 0.5 + audioOnlyScore * 0.5))
+      );
+    } else {
+      // Missing one modality — cap score low so it can't pass
+      breathScore = Math.round(Math.max(mouthOnlyScore, audioOnlyScore) * 0.3);
+    }
 
-    // Envelope for cycle counting: strong breath = mouth open and/or audible exhale
-    const envelope = Math.min(1, Math.max(normAperture * 0.95, currentVolume * 1.05));
+    // Envelope for cycle counting: requires BOTH mouth and audio signal
+    const bothActive = normAperture > 0.03 && currentVolume > 0.015;
+    const envelope = bothActive
+      ? Math.min(1, (normAperture * 0.5 + currentVolume * 0.5) * 1.8)
+      : 0;
     comboEmaRef.current = comboEmaRef.current * 0.88 + envelope * 0.12;
     const s = comboEmaRef.current;
 

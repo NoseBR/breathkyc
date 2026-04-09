@@ -75,15 +75,15 @@ export default function BreathStep({ sessionId, onSuccess, onFail }: BreathStepP
       streamRef.current.getTracks().forEach((t) => t.stop());
     }
 
-    const sent = Math.min(
-      100,
-      Math.max(68, Math.round(statsRef.current.breathScore))
-    );
+    const stats = statsRef.current;
+    const sent = Math.min(100, Math.max(0, Math.round(stats.breathScore)));
 
     try {
       const res = await apiPost("/v1/verify/breath", {
         sessionId,
         syncScore: sent,
+        mouthScore: Math.round(stats.mouthBreathScore),
+        audioScore: Math.round(stats.audioBreathScore),
       });
       const data = await res.json();
 
@@ -160,8 +160,8 @@ export default function BreathStep({ sessionId, onSuccess, onFail }: BreathStepP
             <div className="flex items-center mb-2">
               <Mic className="w-4 h-4 mr-2 text-accent" /> Microphone — breath sounds, exhale, light “ha”
             </div>
-            <div className="flex items-center text-zinc-500 text-xs">
-              <Wind className="w-4 h-4 mr-2 shrink-0" /> Either channel can carry the signal; both together is best.
+            <div className="flex items-center text-yellow-500 text-xs font-medium">
+              <Wind className="w-4 h-4 mr-2 shrink-0" /> Both channels are required to pass verification.
             </div>
           </div>
           <button

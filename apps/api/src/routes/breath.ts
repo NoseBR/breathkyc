@@ -7,10 +7,14 @@ import { encrypt, decrypt } from '../lib/crypto';
 const router = Router();
 const prisma = new PrismaClient();
 
+const MOUTH_MIN = 30;
+const AUDIO_MIN = 25;
+
 const breathSchema = z.object({
   sessionId: z.string(),
   syncScore: z.number().min(0).max(100),
-  audioPayload: z.any().optional(),
+  mouthScore: z.number().min(0).max(100).optional().default(0),
+  audioScore: z.number().min(0).max(100).optional().default(0),
 });
 
 /**
@@ -63,10 +67,17 @@ router.post('/', async (req, res) => {
       });
     }
 
-    const passed = body.syncScore >= 65;
+    // Both mouth AND audio must meet minimums — single-modality is a breach
+    const mouthOk = body.mouthScore >= MOUTH_MIN;
+    const audioOk = body.audioScore >= AUDIO_MIN;
+    const passed = body.syncScore >= 65 && mouthOk && audioOk;
 
     const breathResult = {
       syncScore: body.syncScore,
+      mouthScore: body.mouthScore,
+      audioScore: body.audioScore,
+      mouthOk,
+      audioOk,
       passed,
       timestamp: new Date().toISOString()
     };

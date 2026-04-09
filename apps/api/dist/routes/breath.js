@@ -10,10 +10,13 @@ const crypto_1 = __importDefault(require("crypto"));
 const crypto_2 = require("../lib/crypto");
 const router = (0, express_1.Router)();
 const prisma = new client_1.PrismaClient();
+const MOUTH_MIN = 30;
+const AUDIO_MIN = 25;
 const breathSchema = zod_1.z.object({
     sessionId: zod_1.z.string(),
     syncScore: zod_1.z.number().min(0).max(100),
-    audioPayload: zod_1.z.any().optional(),
+    mouthScore: zod_1.z.number().min(0).max(100).optional().default(0),
+    audioScore: zod_1.z.number().min(0).max(100).optional().default(0),
 });
 /**
  * Combine face template hash + breath data + session into a single
@@ -60,9 +63,16 @@ router.post('/', async (req, res) => {
                 error: 'Face verification did not pass. Complete facial scan before breath analysis.',
             });
         }
-        const passed = body.syncScore >= 65;
+        // Both mouth AND audio must meet minimums — single-modality is a breach
+        const mouthOk = body.mouthScore >= MOUTH_MIN;
+        const audioOk = body.audioScore >= AUDIO_MIN;
+        const passed = body.syncScore >= 65 && mouthOk && audioOk;
         const breathResult = {
             syncScore: body.syncScore,
+            mouthScore: body.mouthScore,
+            audioScore: body.audioScore,
+            mouthOk,
+            audioOk,
             passed,
             timestamp: new Date().toISOString()
         };
