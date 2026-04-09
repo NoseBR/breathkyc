@@ -41,7 +41,8 @@ router.post("/start", rateLimit(100), async (req, res) => {
     });
   } catch (err) {
     console.error("[verify/start]", err);
-    res.status(500).json({ error: "Failed to create verification session" });
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: "Failed to create verification session", debug: message });
   }
 });
 
