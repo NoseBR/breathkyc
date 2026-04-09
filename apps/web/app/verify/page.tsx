@@ -1,23 +1,47 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import GeolocationStep from "./components/GeolocationStep";
 import FacialStep from "./components/FacialStep";
 import BreathStep from "./components/BreathStep";
 import ProgressBar from "./components/ProgressBar";
 import InsecureContextBanner from "./components/InsecureContextBanner";
 import { apiPost } from "../../lib/api";
-import { Loader2, ShieldX, CheckCircle } from "lucide-react";
+import { validateToken, DASHBOARD_URL } from "../../lib/auth";
+import { Loader2, ShieldX, CheckCircle, ShieldAlert } from "lucide-react";
 
 type StepState = "geolocation" | "face" | "breath" | "complete" | "failed";
 
 export default function VerifyPage() {
+  const searchParams = useSearchParams();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState<StepState>("geolocation");
   const [failReason, setFailReason] = useState<string>("");
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authValid, setAuthValid] = useState(false);
 
+  // Check auth token first
   useEffect(() => {
+    async function checkAuth() {
+      const token = searchParams.get("token");
+      if (!token) {
+        setAuthChecked(true);
+        return;
+      }
+      const user = await validateToken(token);
+      if (user) {
+        setAuthValid(true);
+      }
+      setAuthChecked(true);
+    }
+    checkAuth();
+  }, [searchParams]);
+
+  // Only start verification session after auth passes
+  useEffect(() => {
+    if (!authChecked || !authValid) return;
     async function initSession() {
       try {
         const res = await apiPost("/v1/verify/start");
@@ -29,12 +53,43 @@ export default function VerifyPage() {
       }
     }
     initSession();
-  }, []);
+  }, [authChecked, authValid]);
 
   const handleFail = (reason: string) => {
     setFailReason(reason);
     setCurrentStep("failed");
   };
+
+  // Auth check loading
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4">
+        <Loader2 className="w-8 h-8 text-primary animate-spin mb-4" />
+        <p className="text-zinc-500">Verifying authorization...</p>
+      </div>
+    );
+  }
+
+  // No valid token — block access
+  if (!authValid) {
+    return (
+      <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-md mx-auto p-8 bg-zinc-900 border border-zinc-700 text-center rounded-2xl">
+          <ShieldAlert className="w-16 h-16 text-yellow-500 mx-auto mb-4" />
+          <h2 className="text-2xl font-bold text-white mb-3">Authorization Required</h2>
+          <p className="text-zinc-400 mb-6 text-sm">
+            You need to be logged in to the Breath Protocol dashboard to start KYC verification.
+          </p>
+          <button
+            onClick={() => window.location.href = DASHBOARD_URL}
+            className="w-full h-12 flex items-center justify-center bg-primary text-black font-bold rounded-xl hover:bg-[#00d6ef] transition"
+          >
+            Go to Dashboard
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (error) {
     return (
