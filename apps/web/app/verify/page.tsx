@@ -111,7 +111,7 @@ export default function VerifyPage() {
               Session: <span className="font-mono text-zinc-500">{sessionId.slice(0, 16)}...</span>
             </p>
             <button
-              onClick={() => window.location.href = 'https://breath-protocol.vercel.app'}
+              onClick={() => window.location.href = 'https://breath-protocol.vercel.app/dashboard'}
               className="w-full h-12 flex items-center justify-center bg-zinc-800 text-white font-bold rounded-xl hover:bg-zinc-700 transition"
             >
               Return to Dashboard
