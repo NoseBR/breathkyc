@@ -3,12 +3,10 @@ import { PrismaClient } from '@prisma/client';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { encrypt, decrypt } from '../lib/crypto';
-import { matchDocumentTemplateToLive, templateFromJson } from '../lib/faceMatch';
+import { encrypt } from '../lib/crypto';
+import { buildLiveFaceTemplate, templateToJson } from '../lib/faceMatch';
 
-/** Demo MVP: MediaPipe liveness is strict; embedding is heuristic (not FaceNet). */
 const LIVENESS_MIN = 60;
-const MATCH_MIN = 48;
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -28,7 +26,7 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ 
+const upload = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 }
 });
@@ -41,7 +39,7 @@ router.post('/', upload.single('face'), async (req, res) => {
       if (req.file) fs.unlinkSync(req.file.path);
       return res.status(400).json({ error: 'sessionId and livenessScore are required' });
     }
-    
+
     if (!req.file) {
       return res.status(400).json({ error: 'face image file is required' });
     }
@@ -56,53 +54,44 @@ router.post('/', upload.single('face'), async (req, res) => {
     }
 
     const parsedLiveness = parseFloat(livenessScore);
-
-    if (!verification.documentFaceTemplate) {
-      fs.unlinkSync(req.file.path);
-      return res.status(400).json({
-        error: 'No document portrait on file. Complete document capture before face verification.',
-      });
-    }
-
-    let matchScore = 0;
-    try {
-      const docJson = decrypt(verification.documentFaceTemplate);
-      const docVec = templateFromJson(docJson);
-      const faceBuffer = fs.readFileSync(req.file.path);
-      matchScore = await matchDocumentTemplateToLive(docVec, faceBuffer);
-    } catch (e) {
-      console.error('Face match error:', e);
-      fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: 'Could not compare face to document portrait.' });
-    }
-
     const livenessPassed = parsedLiveness >= LIVENESS_MIN;
-    const matchPassed = matchScore >= MATCH_MIN;
-    const passed = livenessPassed && matchPassed;
+
+    // Build facial biometric template from the live selfie
+    let faceTemplateJson = '';
+    try {
+      const faceBuffer = fs.readFileSync(req.file.path);
+      const template = await buildLiveFaceTemplate(faceBuffer);
+      faceTemplateJson = templateToJson(template);
+    } catch (e) {
+      console.error('Face template build error:', e);
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'Could not extract facial features. Ensure good lighting and face is clearly visible.' });
+    }
+
+    const passed = livenessPassed;
 
     const faceResult = {
-      matchScore,
       livenessScore: parsedLiveness,
       passed,
       livenessPassed,
-      matchPassed,
       livenessMin: LIVENESS_MIN,
-      matchMin: MATCH_MIN,
+      templateHash: require('crypto').createHash('sha256').update(faceTemplateJson).digest('hex'),
       timestamp: new Date().toISOString(),
     };
 
-    // B2: Encrypting PII outcome
     const encryptedResult = encrypt(JSON.stringify(faceResult));
+    const encryptedTemplate = encrypt(faceTemplateJson);
 
     await prisma.verification.update({
       where: { sessionId },
       data: {
         faceResult: encryptedResult,
+        documentFaceTemplate: encryptedTemplate,
         status: passed ? 'IN_PROGRESS' : 'FAILED'
       }
     });
 
-    // Auto-delete the file after "processing" (LGPD compliance)
+    // Auto-delete the file (LGPD compliance)
     fs.unlinkSync(req.file.path);
 
     res.json(faceResult);

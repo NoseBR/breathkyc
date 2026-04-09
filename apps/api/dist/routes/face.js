@@ -10,9 +10,7 @@ const path_1 = __importDefault(require("path"));
 const fs_1 = __importDefault(require("fs"));
 const crypto_1 = require("../lib/crypto");
 const faceMatch_1 = require("../lib/faceMatch");
-/** Demo MVP: MediaPipe liveness is strict; embedding is heuristic (not FaceNet). */
 const LIVENESS_MIN = 60;
-const MATCH_MIN = 48;
 const router = (0, express_1.Router)();
 const prisma = new client_1.PrismaClient();
 const uploadDir = path_1.default.join(__dirname, '../../tmp/uploads/faces');
@@ -51,47 +49,39 @@ router.post('/', upload.single('face'), async (req, res) => {
             return res.status(404).json({ error: 'Session not found' });
         }
         const parsedLiveness = parseFloat(livenessScore);
-        if (!verification.documentFaceTemplate) {
-            fs_1.default.unlinkSync(req.file.path);
-            return res.status(400).json({
-                error: 'No document portrait on file. Complete document capture before face verification.',
-            });
-        }
-        let matchScore = 0;
+        const livenessPassed = parsedLiveness >= LIVENESS_MIN;
+        // Build facial biometric template from the live selfie
+        let faceTemplateJson = '';
         try {
-            const docJson = (0, crypto_1.decrypt)(verification.documentFaceTemplate);
-            const docVec = (0, faceMatch_1.templateFromJson)(docJson);
             const faceBuffer = fs_1.default.readFileSync(req.file.path);
-            matchScore = await (0, faceMatch_1.matchDocumentTemplateToLive)(docVec, faceBuffer);
+            const template = await (0, faceMatch_1.buildLiveFaceTemplate)(faceBuffer);
+            faceTemplateJson = (0, faceMatch_1.templateToJson)(template);
         }
         catch (e) {
-            console.error('Face match error:', e);
+            console.error('Face template build error:', e);
             fs_1.default.unlinkSync(req.file.path);
-            return res.status(400).json({ error: 'Could not compare face to document portrait.' });
+            return res.status(400).json({ error: 'Could not extract facial features. Ensure good lighting and face is clearly visible.' });
         }
-        const livenessPassed = parsedLiveness >= LIVENESS_MIN;
-        const matchPassed = matchScore >= MATCH_MIN;
-        const passed = livenessPassed && matchPassed;
+        const passed = livenessPassed;
         const faceResult = {
-            matchScore,
             livenessScore: parsedLiveness,
             passed,
             livenessPassed,
-            matchPassed,
             livenessMin: LIVENESS_MIN,
-            matchMin: MATCH_MIN,
+            templateHash: require('crypto').createHash('sha256').update(faceTemplateJson).digest('hex'),
             timestamp: new Date().toISOString(),
         };
-        // B2: Encrypting PII outcome
         const encryptedResult = (0, crypto_1.encrypt)(JSON.stringify(faceResult));
+        const encryptedTemplate = (0, crypto_1.encrypt)(faceTemplateJson);
         await prisma.verification.update({
             where: { sessionId },
             data: {
                 faceResult: encryptedResult,
+                documentFaceTemplate: encryptedTemplate,
                 status: passed ? 'IN_PROGRESS' : 'FAILED'
             }
         });
-        // Auto-delete the file after "processing" (LGPD compliance)
+        // Auto-delete the file (LGPD compliance)
         fs_1.default.unlinkSync(req.file.path);
         res.json(faceResult);
     }

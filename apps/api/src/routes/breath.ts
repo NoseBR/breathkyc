@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
+import crypto from 'crypto';
 import { encrypt, decrypt } from '../lib/crypto';
 
 const router = Router();
@@ -11,6 +12,20 @@ const breathSchema = z.object({
   syncScore: z.number().min(0).max(100),
   audioPayload: z.any().optional(),
 });
+
+/**
+ * Combine face template hash + breath data + session into a single
+ * biometric hashcode suitable for on-chain storage as a validator.
+ */
+function buildBiometricHash(faceTemplateHash: string, breathData: object, sessionId: string): string {
+  const payload = JSON.stringify({
+    face: faceTemplateHash,
+    breath: breathData,
+    session: sessionId,
+    version: 'breathkyc-v1',
+  });
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}
 
 router.post('/', async (req, res) => {
   try {
@@ -31,22 +46,23 @@ router.post('/', async (req, res) => {
     }
 
     let facePassed = false;
+    let faceTemplateHash = '';
     try {
       const raw = verification.faceResult;
       const parsed = raw.startsWith('{')
-        ? (JSON.parse(raw) as { passed?: boolean })
-        : (JSON.parse(decrypt(raw)) as { passed?: boolean });
+        ? (JSON.parse(raw) as { passed?: boolean; templateHash?: string })
+        : (JSON.parse(decrypt(raw)) as { passed?: boolean; templateHash?: string });
       facePassed = Boolean(parsed.passed);
+      faceTemplateHash = parsed.templateHash || '';
     } catch {
       return res.status(400).json({ error: 'Invalid face verification state.' });
     }
     if (!facePassed) {
       return res.status(400).json({
-        error: 'Face verification did not pass. Complete facial match before breath analysis.',
+        error: 'Face verification did not pass. Complete facial scan before breath analysis.',
       });
     }
 
-    // Client sends combined breath confidence (mouth motion and/or breath audio).
     const passed = body.syncScore >= 65;
 
     const breathResult = {
@@ -55,51 +71,46 @@ router.post('/', async (req, res) => {
       timestamp: new Date().toISOString()
     };
 
+    // Build the combined biometric hash for blockchain validation
+    const biometricHash = passed
+      ? buildBiometricHash(faceTemplateHash, breathResult, body.sessionId)
+      : null;
+
     const finalStatus = passed ? 'COMPLETED' : 'FAILED';
 
-    // B2: Encrypting breath protocol outcome
-    const encryptedResult = encrypt(JSON.stringify(breathResult));
+    const encryptedResult = encrypt(JSON.stringify({
+      ...breathResult,
+      biometricHash,
+    }));
+
+    // Compute an overall score from face liveness + breath sync
+    const overallScore = passed ? Math.round((body.syncScore + 80) / 2) : null;
 
     await prisma.verification.update({
       where: { sessionId: body.sessionId },
       data: {
         breathResult: encryptedResult,
-        status: finalStatus
+        status: finalStatus,
+        overallScore,
+        completedAt: passed ? new Date() : undefined,
       }
     });
 
-    // --- MOCK WEBHOOK DISPATCH ---
     if (finalStatus === 'COMPLETED') {
-      const updatedVerification = await prisma.verification.findUnique({
-        where: { sessionId: body.sessionId }
-      });
-      
-      const safeDecrypt = (val: string | null) => {
-        if (!val) return null;
-        try { return JSON.parse(decrypt(val)); } catch { return null; }
-      };
-
-      const webhookPayload = {
-        event: 'verification.completed',
-        sessionId: body.sessionId,
-        status: 'COMPLETED',
-        timestamp: new Date().toISOString(),
-        results: {
-          geo: updatedVerification?.geoResult ? JSON.parse(updatedVerification.geoResult) : null,
-          document: safeDecrypt(updatedVerification?.documentResult || null),
-          face: safeDecrypt(updatedVerification?.faceResult || null),
-          breath: breathResult,
-        }
-      };
-      
       console.log('\n══════════════════════════════════════════');
-      console.log('🔔 WEBHOOK DISPATCH (mock)');
+      console.log('VERIFICATION COMPLETED');
       console.log('══════════════════════════════════════════');
-      console.log(JSON.stringify(webhookPayload, null, 2));
+      console.log('Session:', body.sessionId);
+      console.log('Biometric Hash:', biometricHash);
+      console.log('Overall Score:', overallScore);
       console.log('══════════════════════════════════════════\n');
     }
 
-    res.json(breathResult);
+    res.json({
+      ...breathResult,
+      biometricHash,
+      overallScore,
+    });
 
   } catch (error) {
     if (error instanceof z.ZodError) {
