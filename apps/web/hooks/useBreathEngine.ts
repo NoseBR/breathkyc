@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useRef, useState, useCallback } from "react";
 import { getFaceLandmarker } from "../lib/mediapipe";
 import type { FaceLandmarkerResult } from "@mediapipe/tasks-vision";
 
@@ -26,7 +26,6 @@ export interface BreathStats {
 
 /**
  * Compute RMS (root-mean-square) energy of raw PCM samples.
- * This is the most direct measure of audio loudness — no FFT, no ML.
  */
 function computeRMS(samples: Float32Array): number {
   if (samples.length === 0) return 0;
@@ -39,9 +38,9 @@ function computeRMS(samples: Float32Array): number {
 
 /**
  * Audio amplification gain applied to microphone input.
- * Phone mics can be very quiet for breathing — this boosts the signal.
+ * Boosted to 8x so normal breathing registers on phone mics.
  */
-const MIC_GAIN = 4.0;
+const MIC_GAIN = 8.0;
 
 /**
  * Fallback minimum RMS threshold (before adaptive calibration kicks in).
@@ -80,30 +79,30 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
   const inhaleRmsRef = useRef<number[]>([]);
   const exhaleRmsRef = useRef<number[]>([]);
 
-  // Latest RMS from audio analysis (updated every ~93ms from ScriptProcessor)
+  // Latest RMS from audio analysis
   const latestRmsRef = useRef(0);
 
-  // Adaptive noise floor: calibrated during idle phase
+  // Adaptive noise floor
   const noiseFloorRef = useRef(0);
   const noiseCalibrationRef = useRef<number[]>([]);
   const noiseCalibrated = useRef(false);
   const breathThresholdRef = useRef(RMS_MIN_THRESHOLD);
 
+  // Peak scores tracked over entire exercise — used for API submission
+  const peakMouthScoreRef = useRef(0);
+  const peakAudioScoreRef = useRef(0);
+  const peakSyncScoreRef = useRef(0);
+
   // Audio pipeline refs
   const audioContextRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
 
-  /**
-   * Initialize audio pipeline: ScriptProcessorNode computes RMS
-   * on every buffer callback (~93ms at 44.1kHz with 4096 buffer).
-   * This is raw PCM energy — no ML, no FFT, no thresholds that can be gamed.
-   */
   const initAudio = useCallback(async (stream: MediaStream) => {
     try {
       const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
       const source = audioCtx.createMediaStreamSource(stream);
 
-      // Amplify mic signal — phone mics are often very quiet for breathing
+      // Amplify mic signal — 8x boost for quiet breathing on phone mics
       const gainNode = audioCtx.createGain();
       gainNode.gain.value = MIC_GAIN;
       source.connect(gainNode);
@@ -118,7 +117,6 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       };
 
       gainNode.connect(processor);
-      // Silent output to keep processor alive
       const silentGain = audioCtx.createGain();
       silentGain.gain.value = 0;
       processor.connect(silentGain);
@@ -130,7 +128,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
 
       audioContextRef.current = audioCtx;
       processorRef.current = processor;
-      console.log("[BreathEngine] Audio initialized. SampleRate:", audioCtx.sampleRate);
+      console.log("[BreathEngine] Audio initialized. SampleRate:", audioCtx.sampleRate, "Gain:", MIC_GAIN);
     } catch (e) {
       console.error("[BreathEngine] Audio Init Failed:", e);
     }
@@ -140,7 +138,6 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     const rms = latestRmsRef.current;
     const threshold = breathThresholdRef.current;
 
-    // breathingDetected = raw audio energy is above the adaptive threshold
     const isBreathDetected = rms > threshold;
 
     let mouthAperture = 0;
@@ -155,19 +152,22 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
 
     const normAperture = Math.min(mouthAperture * 20, 1);
 
-    // Scoring — only give audio score if RMS is above threshold
+    // Scoring
     const mouthOnlyScore = normAperture > 0.042 ? Math.min(100, 28 + normAperture * 88) : 0;
-    const audioOnlyScore = isBreathDetected ? Math.min(100, 28 + rms * 3000) : 0;
-    const syncCorrelationScore = (mouthOnlyScore > 0 && audioOnlyScore > 0)
-      ? Math.round((mouthOnlyScore + audioOnlyScore) / 2)
-      : 0;
+    const audioOnlyScore = isBreathDetected ? Math.min(100, 28 + rms * 2000) : 0;
 
-    let breathScore: number;
+    let syncScore = 0;
+    let breathScore = 0;
+
     if (mouthOnlyScore > 0 && audioOnlyScore > 0) {
-      breathScore = Math.round(syncCorrelationScore);
-    } else {
-      breathScore = 0; // ZERO if either modality missing
+      syncScore = Math.round((mouthOnlyScore + audioOnlyScore) / 2);
+      breathScore = syncScore;
     }
+
+    // Track peak scores over the entire exercise
+    if (mouthOnlyScore > peakMouthScoreRef.current) peakMouthScoreRef.current = mouthOnlyScore;
+    if (audioOnlyScore > peakAudioScoreRef.current) peakAudioScoreRef.current = audioOnlyScore;
+    if (syncScore > peakSyncScoreRef.current) peakSyncScoreRef.current = syncScore;
 
     setIsBreathing(normAperture > 0.042 && isBreathDetected);
 
@@ -181,15 +181,12 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     const phaseElapsed = now - phaseStartMsRef.current;
 
     if (phaseRef.current === "idle") {
-      // Calibrate noise floor during idle phase (user should be silent)
       noiseCalibrationRef.current.push(rms);
       if (phaseElapsed >= PAUSE_MS) {
-        // Set adaptive threshold based on measured noise floor
         const samples = noiseCalibrationRef.current;
         if (samples.length > 10) {
           const avgNoise = samples.reduce((a, b) => a + b, 0) / samples.length;
           noiseFloorRef.current = avgNoise;
-          // Threshold = 2.5× noise floor, but at least RMS_MIN_THRESHOLD
           breathThresholdRef.current = Math.max(RMS_MIN_THRESHOLD, avgNoise * 2.5);
           if (!noiseCalibrated.current) {
             console.log("[BreathEngine] Noise calibrated:",
@@ -204,7 +201,6 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
         inhaleRmsRef.current = [];
       }
     } else if (phaseRef.current === "inhale") {
-      // Collect RMS values during inhale
       inhaleRmsRef.current.push(rms);
       if (phaseElapsed >= INHALE_MS) {
         phaseRef.current = "exhale";
@@ -212,25 +208,15 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
         exhaleRmsRef.current = [];
       }
     } else if (phaseRef.current === "exhale") {
-      // Collect RMS values during exhale
       exhaleRmsRef.current.push(rms);
       if (phaseElapsed >= EXHALE_MS) {
-        // === CYCLE VALIDATION ===
-        // Both phases must have SUSTAINED audio energy above the noise floor.
-        // This uses raw PCM RMS — the most direct measurement possible.
-        // Opening your mouth without sound produces RMS ≈ 0.001 (electronic noise only).
-        // Real breathing produces RMS ≈ 0.01–0.1.
-
+        const t = breathThresholdRef.current;
         const inhaleValues = inhaleRmsRef.current;
         const exhaleValues = exhaleRmsRef.current;
 
-        const t = breathThresholdRef.current;
-
-        // Count how many RMS samples exceeded the adaptive threshold in each phase
         const inhaleAbove = inhaleValues.filter(v => v > t).length;
         const exhaleAbove = exhaleValues.filter(v => v > t).length;
 
-        // Require at least 25% of samples above threshold in EACH phase
         const inhaleRatio = inhaleValues.length > 0 ? inhaleAbove / inhaleValues.length : 0;
         const exhaleRatio = exhaleValues.length > 0 ? exhaleAbove / exhaleValues.length : 0;
 
@@ -239,19 +225,15 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
 
         if (inhaleOk && exhaleOk) {
           cyclesCompletedRef.current += 1;
-          console.log(
-            "[BreathEngine] ✅ CYCLE COUNTED",
-            `| inhale: ${(inhaleRatio*100).toFixed(0)}% above threshold`,
-            `| exhale: ${(exhaleRatio*100).toFixed(0)}% above threshold`,
-            `| threshold=${t.toFixed(5)} noiseFloor=${noiseFloorRef.current.toFixed(5)}`
-          );
+          console.log("[BreathEngine] ✅ CYCLE COUNTED",
+            `| inhale: ${(inhaleRatio*100).toFixed(0)}%`,
+            `| exhale: ${(exhaleRatio*100).toFixed(0)}%`,
+            `| threshold=${t.toFixed(5)}`);
         } else {
-          console.log(
-            "[BreathEngine] ❌ CYCLE REJECTED",
-            `| inhale: ${(inhaleRatio*100).toFixed(0)}% (need 25%)`,
-            `| exhale: ${(exhaleRatio*100).toFixed(0)}% (need 25%)`,
-            `| threshold=${t.toFixed(5)} noiseFloor=${noiseFloorRef.current.toFixed(5)}`
-          );
+          console.log("[BreathEngine] ❌ CYCLE REJECTED",
+            `| inhale: ${(inhaleRatio*100).toFixed(0)}%`,
+            `| exhale: ${(exhaleRatio*100).toFixed(0)}%`,
+            `| threshold=${t.toFixed(5)}`);
         }
 
         phaseRef.current = "idle";
@@ -265,13 +247,14 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     else if (phaseRef.current === "inhale") phaseProgress = Math.min(1, pe / INHALE_MS);
     else phaseProgress = Math.min(1, pe / EXHALE_MS);
 
+    // Use PEAK scores (accumulated over exercise) for the stats that get sent to API
     setCurrentStats({
       audioVolume: rms,
       mouthAperture: normAperture,
-      syncScore: Math.round(syncCorrelationScore),
-      mouthBreathScore: Math.round(mouthOnlyScore),
-      audioBreathScore: Math.round(audioOnlyScore),
-      breathScore,
+      syncScore: Math.round(peakSyncScoreRef.current),
+      mouthBreathScore: Math.round(peakMouthScoreRef.current),
+      audioBreathScore: Math.round(peakAudioScoreRef.current),
+      breathScore: Math.round(peakSyncScoreRef.current),
       cyclesCompleted: cyclesCompletedRef.current,
       breathPhase: phaseRef.current,
       phaseProgress,
@@ -306,6 +289,9 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       noiseCalibrationRef.current = [];
       noiseCalibrated.current = false;
       breathThresholdRef.current = RMS_MIN_THRESHOLD;
+      peakMouthScoreRef.current = 0;
+      peakAudioScoreRef.current = 0;
+      peakSyncScoreRef.current = 0;
       setCurrentStats((prev) => ({ ...prev, cyclesCompleted: 0 }));
 
       await Promise.all([
