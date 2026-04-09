@@ -48,7 +48,7 @@ export default function FacialStep({ sessionId, onSuccess, onFail }: FacialStepP
       console.error("Camera error:", e);
       if (isInsecureContext()) {
         setErrorMSG(
-          "Camera blocked: http:// + Wi‑Fi IP is not a secure context on most phones. Use "Upload selfie" below or HTTPS."
+          "Camera blocked: http:// + Wi\u2011Fi IP is not a secure context on most phones. Use 'Upload selfie' below or HTTPS."
         );
       } else {
         setErrorMSG("Front camera access denied. Allow camera for this site in browser settings.");
