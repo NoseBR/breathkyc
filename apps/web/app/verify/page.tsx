@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import GeolocationStep from "./components/GeolocationStep";
 import FacialStep from "./components/FacialStep";
@@ -14,6 +14,19 @@ import { Loader2, ShieldX, CheckCircle, ShieldAlert } from "lucide-react";
 type StepState = "geolocation" | "face" | "breath" | "complete" | "failed";
 
 export default function VerifyPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4">
+        <Loader2 className="w-8 h-8 text-primary animate-spin mb-4" />
+        <p className="text-zinc-500">Loading...</p>
+      </div>
+    }>
+      <VerifyContent />
+    </Suspense>
+  );
+}
+
+function VerifyContent() {
   const searchParams = useSearchParams();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
