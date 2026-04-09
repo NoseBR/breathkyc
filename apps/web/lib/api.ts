@@ -3,17 +3,24 @@ const DEMO_HEADERS: Record<string, string> = {
 };
 
 /**
- * - Set NEXT_PUBLIC_API_URL (e.g. http://192.168.1.10:3001) when the API is not on localhost.
- * - If unset in the browser, uses the same hostname as the page + port 3001 so phone → http://YOUR_LAN_IP:3000 works with API on :3001.
+ * Production: points to Render API.
+ * Dev: uses same hostname + port 3001 so LAN testing works.
  */
+const PRODUCTION_API = "https://breathkyc.onrender.com";
+
 export function getApiBase(): string {
+  // Check env var first (works in dev with .env.local)
   const fromEnv = process.env.NEXT_PUBLIC_API_URL?.trim();
   if (fromEnv) return fromEnv.replace(/\/$/, "");
+  // In the browser on production, use the hardcoded Render URL
   if (typeof window !== "undefined") {
-    const { protocol, hostname } = window.location;
-    return `${protocol}//${hostname}:3001`;
+    const { hostname } = window.location;
+    if (hostname === "localhost" || hostname.startsWith("192.168") || hostname.startsWith("10.")) {
+      return `${window.location.protocol}//${hostname}:3001`;
+    }
+    return PRODUCTION_API;
   }
-  return "http://localhost:3001";
+  return PRODUCTION_API;
 }
 
 export async function apiFetch(path: string, options: RequestInit = {}) {
