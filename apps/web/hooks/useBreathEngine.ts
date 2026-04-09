@@ -31,22 +31,27 @@ function variance(arr: number[]): number {
 
 /**
  * Checks whether a guided phase had real breathing using ML classifications.
- * Each classification is "inhale", "exhale", or "silence".
- * Phase is valid if enough classifications match the expected breath type.
+ * Each classification is { label, confidence }.
+ * Phase is valid if enough HIGH-CONFIDENCE classifications match the expected breath type.
  */
 function isPhaseValidML(
-  classifications: BreathClass[],
+  classifications: { label: BreathClass; confidence: number }[],
   expectedType: "inhale" | "exhale"
 ): boolean {
-  if (classifications.length < 2) return false;
+  // Need minimum samples to be meaningful
+  if (classifications.length < 3) return false;
 
-  const breathCount = classifications.filter(
-    (c) => c === expectedType
+  // Only consider classifications with confidence > 0.55
+  const confident = classifications.filter((c) => c.confidence > 0.55);
+  if (confident.length < 2) return false;
+
+  const breathCount = confident.filter(
+    (c) => c.label === expectedType
   ).length;
-  const ratio = breathCount / classifications.length;
+  const ratio = breathCount / confident.length;
 
-  // At least 40% of classifications must match the expected type
-  return ratio >= 0.40;
+  // At least 50% of confident classifications must match the expected type
+  return ratio >= 0.50;
 }
 
 export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | null>) {
@@ -76,14 +81,17 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
   const phaseRef = useRef<BreathPhase>("idle");
   const phaseStartMsRef = useRef(0);
 
-  // ML classification results collected during each phase
-  const inhaleClassesRef = useRef<BreathClass[]>([]);
-  const exhaleClassesRef = useRef<BreathClass[]>([]);
+  // ML classification results collected during each phase (label + confidence)
+  const inhaleClassesRef = useRef<{ label: BreathClass; confidence: number }[]>([]);
+  const exhaleClassesRef = useRef<{ label: BreathClass; confidence: number }[]>([]);
 
   // Latest ML classification result (updated every ~250ms)
   const latestClassRef = useRef<BreathClass>("silence");
   const latestConfidenceRef = useRef(0);
   const classifierActiveRef = useRef(false);
+
+  // Track how many successful ML inferences have run
+  const classifySuccessCountRef = useRef(0);
 
   // Audio pipeline refs
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -161,8 +169,12 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
         latestClassRef.current = result.label;
         latestConfidenceRef.current = result.confidence;
         classifierActiveRef.current = true;
+        classifySuccessCountRef.current += 1;
       } catch (e) {
         console.error("[BreathEngine] Classification error:", e);
+        // Reset to silence on error so stale values don't replay
+        latestClassRef.current = "silence";
+        latestConfidenceRef.current = 0;
       }
     }, 250);
   }, []);
@@ -254,24 +266,25 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       phaseStartMsRef.current = now;
       inhaleClassesRef.current = [];
     } else if (phaseRef.current === "inhale") {
-      // Collect ML classifications during inhale phase (sampled at ~60fps but ML updates at 4Hz)
-      inhaleClassesRef.current.push(mlClass);
+      // Collect ML classifications during inhale phase (with confidence)
+      inhaleClassesRef.current.push({ label: mlClass, confidence: mlConfidence });
       if (phaseElapsed >= INHALE_MS) {
         phaseRef.current = "exhale";
         phaseStartMsRef.current = now;
         exhaleClassesRef.current = [];
       }
     } else if (phaseRef.current === "exhale") {
-      exhaleClassesRef.current.push(mlClass);
+      exhaleClassesRef.current.push({ label: mlClass, confidence: mlConfidence });
       if (phaseElapsed >= EXHALE_MS) {
         // ML-based validation: check if the model detected breathing during each phase.
         // Deduplicate: since calculateSync runs at 60fps but ML updates at 4Hz,
         // we get ~14 classifications per 3.5s phase from the ML model.
         // The same classification is repeated across ~15 frames. Deduplicate by
         // sampling every ~15th entry.
-        const dedup = (arr: BreathClass[]) => {
+        type ClassEntry = { label: BreathClass; confidence: number };
+        const dedup = (arr: ClassEntry[]) => {
           const step = Math.max(1, Math.floor(arr.length / 14));
-          const result: BreathClass[] = [];
+          const result: ClassEntry[] = [];
           for (let i = 0; i < arr.length; i += step) result.push(arr[i]!);
           return result;
         };
@@ -282,17 +295,15 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
         const inhaleOk = isPhaseValidML(inhaleDeduped, "inhale");
         const exhaleOk = isPhaseValidML(exhaleDeduped, "exhale");
 
-        if (classifierActiveRef.current && (inhaleOk || exhaleOk)) {
-          // Accept if EITHER phase detected breathing (user may breathe
-          // through nose on inhale and mouth on exhale, or vice versa)
-          // but at least ONE phase must have ML-confirmed breathing.
-          const bothPhases = inhaleOk && exhaleOk;
-          const anyBreath = inhaleDeduped.some(c => c !== "silence") &&
-                           exhaleDeduped.some(c => c !== "silence");
-
-          if (bothPhases || anyBreath) {
-            cyclesCompletedRef.current += 1;
-          }
+        // Require ML classifier to have run successfully at least 5 times
+        // AND BOTH phases must pass validation (no weak fallbacks)
+        if (classifierActiveRef.current && classifySuccessCountRef.current >= 5
+            && inhaleOk && exhaleOk) {
+          cyclesCompletedRef.current += 1;
+          console.log("[BreathEngine] Cycle counted — inhale + exhale ML-validated");
+        } else if (classifierActiveRef.current) {
+          console.log("[BreathEngine] Cycle REJECTED — inhaleOk:", inhaleOk, "exhaleOk:", exhaleOk,
+            "successCount:", classifySuccessCountRef.current);
         }
 
         phaseRef.current = "idle";
@@ -346,6 +357,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       latestClassRef.current = "silence";
       latestConfidenceRef.current = 0;
       classifierActiveRef.current = false;
+      classifySuccessCountRef.current = 0;
       setCurrentStats((prev) => ({ ...prev, cyclesCompleted: 0 }));
 
       // Load ML model + audio + face in parallel
