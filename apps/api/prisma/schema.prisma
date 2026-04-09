@@ -1,0 +1,64 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Client {
+  id            String         @id @default(cuid())
+  name          String
+  email         String         @unique
+  webhookUrl    String?
+  isActive      Boolean        @default(true)
+  createdAt     DateTime       @default(now())
+  apiKeys       ApiKey[]
+  verifications Verification[]
+}
+
+model ApiKey {
+  id        String    @id @default(cuid())
+  keyHash   String    @unique
+  prefix    String
+  clientId  String
+  client    Client    @relation(fields: [clientId], references: [id])
+  isActive  Boolean   @default(true)
+  lastUsed  DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([clientId])
+}
+
+model Verification {
+  id        String             @id @default(cuid())
+  sessionId String             @unique @default(cuid())
+  clientId  String
+  client    Client             @relation(fields: [clientId], references: [id])
+  status    VerificationStatus @default(PENDING)
+
+  geoResult      Json?
+  documentResult Json?
+  faceResult     Json?
+  breathResult   Json?
+
+  overallScore Float?
+  cpfHash      String?
+  expiresAt    DateTime
+  completedAt  DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([clientId])
+  @@index([cpfHash])
+  @@index([status])
+}
+
+enum VerificationStatus {
+  PENDING
+  IN_PROGRESS
+  PASSED
+  FAILED
+  EXPIRED
+}
