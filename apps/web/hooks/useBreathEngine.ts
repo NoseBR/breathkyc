@@ -39,10 +39,15 @@ function computeRMS(samples: Float32Array): number {
 }
 
 /**
- * Audio amplification gain applied to microphone input.
- * Boosted to 8x so normal breathing registers on phone mics.
+ * Base mic gain for exhale / idle phases.
  */
 const MIC_GAIN = 20.0;
+
+/**
+ * Boosted mic gain during inhale phase only.
+ * Inhales are naturally quieter — extra amplification helps.
+ */
+const MIC_GAIN_INHALE = 40.0;
 
 /**
  * Fallback minimum RMS threshold (before adaptive calibration kicks in).
@@ -99,6 +104,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
   // Audio pipeline refs
   const audioContextRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
 
   const initAudio = useCallback(async (stream: MediaStream) => {
     try {
@@ -131,6 +137,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
 
       audioContextRef.current = audioCtx;
       processorRef.current = processor;
+      gainNodeRef.current = gainNode;
       console.log("[BreathEngine] Audio initialized. SampleRate:", audioCtx.sampleRate, "Gain:", MIC_GAIN);
     } catch (e) {
       console.error("[BreathEngine] Audio Init Failed:", e);
@@ -202,6 +209,8 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
         phaseRef.current = "inhale";
         phaseStartMsRef.current = now;
         inhaleRmsRef.current = [];
+        // Boost mic gain for inhale
+        if (gainNodeRef.current) gainNodeRef.current.gain.value = MIC_GAIN_INHALE;
       }
     } else if (phaseRef.current === "inhale") {
       inhaleRmsRef.current.push(rms);
@@ -209,6 +218,8 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
         phaseRef.current = "exhale";
         phaseStartMsRef.current = now;
         exhaleRmsRef.current = [];
+        // Restore normal gain for exhale
+        if (gainNodeRef.current) gainNodeRef.current.gain.value = MIC_GAIN;
       }
     } else if (phaseRef.current === "exhale") {
       exhaleRmsRef.current.push(rms);
@@ -223,9 +234,8 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
         const inhaleRatio = inhaleValues.length > 0 ? inhaleAbove / inhaleValues.length : 0;
         const exhaleRatio = exhaleValues.length > 0 ? exhaleAbove / exhaleValues.length : 0;
 
-        // Inhale is naturally quieter — use lower threshold + lower ratio
-        const inhaleOk = inhaleValues.filter(v => v > t * 0.5).length / (inhaleValues.length || 1) >= 0.10;
-        const exhaleOk = exhaleRatio >= 0.20;
+        const inhaleOk = inhaleRatio >= 0.25;
+        const exhaleOk = exhaleRatio >= 0.25;
 
         if (inhaleOk && exhaleOk) {
           cyclesCompletedRef.current += 1;
