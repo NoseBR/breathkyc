@@ -90,6 +90,8 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const dataArrayRef = useRef<Uint8Array | null>(null);
+  const freqDataRef = useRef<Uint8Array | null>(null);
+  const prevSpectrumRef = useRef<Float32Array | null>(null);
 
   const initAudio = useCallback(async (stream: MediaStream) => {
     try {
@@ -111,6 +113,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       audioContextRef.current = audioCtx;
       analyserRef.current = analyser;
       dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
+      freqDataRef.current = new Uint8Array(analyser.frequencyBinCount);
     } catch (e) {
       console.error("Audio Context Init Failed:", e);
     }
@@ -132,8 +135,42 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     return Math.min(rms * 8, 1);
   }, []);
 
+  /** Spectral flux: measures how much the frequency spectrum changes frame-to-frame.
+   *  Breathing creates sudden spectral change (high flux). Static mic noise doesn't (zero flux). */
+  const getSpectralFlux = useCallback(() => {
+    const analyser = analyserRef.current;
+    const freqData = freqDataRef.current;
+    if (!analyser || !freqData) return 0;
+
+    analyser.getByteFrequencyData(freqData as Uint8Array<ArrayBuffer>);
+
+    const current = new Float32Array(freqData.length);
+    for (let i = 0; i < freqData.length; i++) {
+      current[i] = freqData[i]! / 255;
+    }
+
+    let flux = 0;
+    const prev = prevSpectrumRef.current;
+    if (prev && prev.length === current.length) {
+      for (let i = 0; i < current.length; i++) {
+        const diff = current[i]! - prev[i]!;
+        if (diff > 0) flux += diff; // onset-only (positive changes)
+      }
+      flux /= current.length;
+    }
+
+    prevSpectrumRef.current = current;
+    return flux;
+  }, []);
+
   const calculateSync = useCallback((results: FaceLandmarkerResult) => {
     const currentVolume = getRMSVolume();
+    const spectralFlux = getSpectralFlux();
+
+    // Gate volume by spectral flux — static mic noise has near-zero flux,
+    // so breathSignal ≈ 0 even if volume is high. Real breathing has high flux.
+    const fluxGate = Math.max(0, Math.min(1, (spectralFlux - 0.003) / 0.012));
+    const breathSignal = currentVolume * fluxGate;
 
     let mouthAperture = 0;
     const marks = results.faceLandmarks?.[0] as { x: number; y: number }[] | undefined;
@@ -147,7 +184,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
 
     const normAperture = Math.min(mouthAperture * 20, 1);
 
-    historyRef.current.push({ vol: currentVolume, mouth: normAperture });
+    historyRef.current.push({ vol: breathSignal, mouth: normAperture });
     if (historyRef.current.length > 100) historyRef.current.shift();
 
     const len = historyRef.current.length;
@@ -207,14 +244,13 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     if (phaseStartMsRef.current === 0) phaseStartMsRef.current = now;
     const phaseElapsed = now - phaseStartMsRef.current;
 
-    // Collect idle volumes every idle phase for baseline comparison
+    // Collect idle breath signals for baseline comparison
     if (phaseRef.current === "idle") {
-      idleVolumesRef.current.push(currentVolume);
+      idleVolumesRef.current.push(breathSignal);
     }
 
-    // Real-time indicator for UI
-    const liveThreshold = Math.max(0.20, idleAvgRef.current * 2.5);
-    const isBreathDetected = currentVolume > liveThreshold;
+    // Real-time indicator: only lights up when spectral flux confirms real sound
+    const isBreathDetected = breathSignal > 0.10;
 
     if (phaseRef.current === "idle" && phaseElapsed >= PAUSE_MS) {
       // Compute idle baseline from this idle period
@@ -227,14 +263,14 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       inhaleVolumesRef.current = [];
       idleVolumesRef.current = [];
     } else if (phaseRef.current === "inhale") {
-      inhaleVolumesRef.current.push(currentVolume);
+      inhaleVolumesRef.current.push(breathSignal);
       if (phaseElapsed >= INHALE_MS) {
         phaseRef.current = "exhale";
         phaseStartMsRef.current = now;
         exhaleVolumesRef.current = [];
       }
     } else if (phaseRef.current === "exhale") {
-      exhaleVolumesRef.current.push(currentVolume);
+      exhaleVolumesRef.current.push(breathSignal);
       if (phaseElapsed >= EXHALE_MS) {
         // Compare breathing audio against the idle baseline from just before
         const idle = idleAvgRef.current;
@@ -255,7 +291,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     else phaseProgress = Math.min(1, pe / EXHALE_MS);
 
     setCurrentStats({
-      audioVolume: currentVolume,
+      audioVolume: breathSignal,
       mouthAperture: normAperture,
       syncScore: Math.round(syncCorrelationScore),
       mouthBreathScore: Math.round(mouthOnlyScore),
@@ -266,7 +302,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       phaseProgress,
       breathingDetected: isBreathDetected,
     });
-  }, [getRMSVolume]);
+  }, [getRMSVolume, getSpectralFlux]);
 
   const predictLoop = useCallback(async () => {
     const video = videoRef.current;
@@ -293,6 +329,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       exhaleVolumesRef.current = [];
       idleVolumesRef.current = [];
       idleAvgRef.current = 0;
+      prevSpectrumRef.current = null;
       setCurrentStats((prev) => ({ ...prev, cyclesCompleted: 0 }));
 
       await initAudio(stream);
