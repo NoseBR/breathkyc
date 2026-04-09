@@ -305,23 +305,40 @@ export default function BreathStep({ sessionId, onSuccess, onFail }: BreathStepP
             </svg>
           </div>
 
-          {/* Sound detection indicator */}
+          {/* Sound detection indicator + live RMS meter */}
           {engineReady && (
-            <div className="flex items-center gap-2 mb-4">
-              <div
-                className={`w-2.5 h-2.5 rounded-full transition-colors ${
-                  currentStats.breathingDetected
-                    ? "bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.6)]"
-                    : "bg-zinc-600"
-                }`}
-              />
-              <span
-                className={`text-sm ${
-                  currentStats.breathingDetected ? "text-green-400" : "text-zinc-500"
-                }`}
-              >
-                {currentStats.breathingDetected ? "Breath sound detected" : "Listening for breath..."}
-              </span>
+            <div className="flex flex-col items-center gap-2 mb-4">
+              <div className="flex items-center gap-2">
+                <div
+                  className={`w-2.5 h-2.5 rounded-full transition-colors ${
+                    currentStats.breathingDetected
+                      ? "bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.6)]"
+                      : "bg-zinc-600"
+                  }`}
+                />
+                <span
+                  className={`text-sm ${
+                    currentStats.breathingDetected ? "text-green-400" : "text-zinc-500"
+                  }`}
+                >
+                  {currentStats.breathingDetected ? "Breath sound detected" : "Listening for breath..."}
+                </span>
+              </div>
+              {/* Live audio level bar */}
+              <div className="w-full max-w-[200px] flex items-center gap-2">
+                <span className="text-[10px] text-zinc-600 w-6">MIC</span>
+                <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-75 ${
+                      currentStats.breathingDetected ? "bg-green-400" : "bg-zinc-600"
+                    }`}
+                    style={{ width: `${Math.min(100, (currentStats.audioRms || 0) * 1500)}%` }}
+                  />
+                </div>
+                <span className="text-[10px] text-zinc-600 w-12 text-right font-mono">
+                  {((currentStats.audioRms || 0) * 1000).toFixed(1)}
+                </span>
+              </div>
             </div>
           )}
 
