@@ -18,7 +18,16 @@ app.use(loggingMiddleware);
 
 // Health check
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "breathkyc-api", timestamp: new Date().toISOString() });
+  res.json({
+    status: "ok",
+    service: "breathkyc-api",
+    timestamp: new Date().toISOString(),
+    env: {
+      hasDbUrl: !!process.env.DATABASE_URL,
+      corsOrigin: process.env.CORS_ORIGIN ?? "NOT SET",
+      nodeEnv: process.env.NODE_ENV ?? "NOT SET",
+    },
+  });
 });
 
 // Routes
