@@ -59,6 +59,13 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
   const phaseStartMsRef = useRef(0);
   const inhaleAudioFramesRef = useRef(0);
   const exhaleAudioFramesRef = useRef(0);
+  const inhalePeakRef = useRef(0);
+  const exhalePeakRef = useRef(0);
+
+  // Noise floor calibration — measured during first idle phase
+  const noiseFloorRef = useRef(0);
+  const noiseFloorSamplesRef = useRef<number[]>([]);
+  const noiseFloorCalibratedRef = useRef(false);
 
   // YAMNet audio classification
   const breathingConfidenceRef = useRef(0);
@@ -212,39 +219,60 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     }
 
     // --- Guided breath phase detection ---
-    // Timed phases prompt inhale → exhale. Audio must be detected
-    // in BOTH phases for a cycle to count.
+    // Timed phases prompt inhale → exhale. Audio must be CLEARLY
+    // above ambient noise in BOTH phases for a cycle to count.
     const INHALE_MS = 3500;
     const EXHALE_MS = 3500;
-    const PAUSE_MS = 1500;
-    const AUDIO_PHASE_THRESHOLD = 0.15;
-    const MIN_PHASE_AUDIO = 12;
+    const PAUSE_MS = 2000;
+    const ABSOLUTE_MIN_VOLUME = 0.30;   // hard floor — nothing below this counts
+    const MIN_PHASE_AUDIO = 35;         // ~0.6s at 60fps, ~1.2s at 30fps
+    const MIN_PHASE_PEAK = 0.45;        // peak must hit this during the phase
 
     const now = performance.now();
     if (phaseStartMsRef.current === 0) phaseStartMsRef.current = now;
     const phaseElapsed = now - phaseStartMsRef.current;
 
-    // YAMNet ML detection if available, otherwise fall back to volume threshold
+    // Noise floor calibration during idle phase
+    if (phaseRef.current === "idle" && !noiseFloorCalibratedRef.current) {
+      noiseFloorSamplesRef.current.push(currentVolume);
+      if (noiseFloorSamplesRef.current.length >= 40) {
+        const sorted = [...noiseFloorSamplesRef.current].sort((a, b) => a - b);
+        noiseFloorRef.current = sorted[Math.floor(sorted.length * 0.9)]!; // 90th percentile
+        noiseFloorCalibratedRef.current = true;
+      }
+    }
+
+    // Dynamic threshold: at least 2.5x noise floor, but never below ABSOLUTE_MIN_VOLUME
+    const dynamicThreshold = Math.max(ABSOLUTE_MIN_VOLUME, noiseFloorRef.current * 2.5);
+
+    // YAMNet ML detection if available, otherwise dynamic volume threshold
     const isBreathDetected = yamnetReadyRef.current
-      ? breathingConfidenceRef.current > 0.25
-      : currentVolume > AUDIO_PHASE_THRESHOLD;
+      ? breathingConfidenceRef.current > 0.4
+      : currentVolume > dynamicThreshold;
 
     if (phaseRef.current === "idle" && phaseElapsed >= PAUSE_MS) {
       phaseRef.current = "inhale";
       phaseStartMsRef.current = now;
       inhaleAudioFramesRef.current = 0;
+      inhalePeakRef.current = 0;
     } else if (phaseRef.current === "inhale") {
       if (isBreathDetected) inhaleAudioFramesRef.current += 1;
+      inhalePeakRef.current = Math.max(inhalePeakRef.current, currentVolume);
       if (phaseElapsed >= INHALE_MS) {
         phaseRef.current = "exhale";
         phaseStartMsRef.current = now;
         exhaleAudioFramesRef.current = 0;
+        exhalePeakRef.current = 0;
       }
     } else if (phaseRef.current === "exhale") {
       if (isBreathDetected) exhaleAudioFramesRef.current += 1;
+      exhalePeakRef.current = Math.max(exhalePeakRef.current, currentVolume);
       if (phaseElapsed >= EXHALE_MS) {
-        if (inhaleAudioFramesRef.current >= MIN_PHASE_AUDIO &&
-            exhaleAudioFramesRef.current >= MIN_PHASE_AUDIO) {
+        const inhaleOk = inhaleAudioFramesRef.current >= MIN_PHASE_AUDIO
+                      && inhalePeakRef.current >= MIN_PHASE_PEAK;
+        const exhaleOk = exhaleAudioFramesRef.current >= MIN_PHASE_AUDIO
+                      && exhalePeakRef.current >= MIN_PHASE_PEAK;
+        if (inhaleOk && exhaleOk) {
           cyclesCompletedRef.current += 1;
         }
         phaseRef.current = "idle";
@@ -295,6 +323,11 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       phaseStartMsRef.current = 0;
       inhaleAudioFramesRef.current = 0;
       exhaleAudioFramesRef.current = 0;
+      inhalePeakRef.current = 0;
+      exhalePeakRef.current = 0;
+      noiseFloorRef.current = 0;
+      noiseFloorSamplesRef.current = [];
+      noiseFloorCalibratedRef.current = false;
       breathingConfidenceRef.current = 0;
       yamnetBufferRef.current = [];
       yamnetSamplesRef.current = 0;
