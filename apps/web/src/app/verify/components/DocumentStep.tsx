@@ -32,15 +32,25 @@ export function DocumentStep() {
 
   const startCamera = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
-      });
+      // Use "ideal" so desktop (no rear camera) falls back to any available camera
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        });
+      } catch {
+        // Fallback: request any camera if environment mode fails
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+        });
+      }
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
       }
       setState("capture");
-    } catch {
+    } catch (err) {
+      console.error("Camera error:", err);
       setError("Camera access denied. You can also upload a photo of your document.");
       setState("error");
     }

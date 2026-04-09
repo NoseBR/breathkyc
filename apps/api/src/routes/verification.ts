@@ -1,9 +1,12 @@
 import { Router } from "express";
 import multer from "multer";
 import { z } from "zod";
+import fs from "fs";
 import { prisma } from "../utils/prisma";
 import { hashCpf } from "../utils/encryption";
 import { rateLimit } from "../middleware/rateLimit";
+import { runTesseractOcrWithBestOrientation } from "../services/ocr/tesseractOcr";
+import { parseBrazilianIdFields } from "../lib/brazilIdParse";
 
 const router = Router();
 const upload = multer({ dest: "uploads/", limits: { fileSize: 10 * 1024 * 1024 } });
@@ -135,13 +138,18 @@ router.post("/document", upload.single("document"), async (req, res) => {
       return;
     }
 
-    // MVP: Return mock OCR data. Real OCR (Google Vision / Textract) in Phase B.
-    const mockData = {
-      name: "João da Silva",
-      cpf: "123.456.789-09",
-      dateOfBirth: "1990-05-15",
-      documentNumber: "1234567890",
-      ocrConfidence: 0.87,
+    // Read uploaded file into a buffer for Tesseract OCR
+    const imageBuffer = fs.readFileSync(req.file.path);
+
+    const ocrResult = await runTesseractOcrWithBestOrientation(imageBuffer);
+    const parsed = parseBrazilianIdFields(ocrResult.text);
+
+    const ocrData = {
+      name: parsed.name,
+      cpf: parsed.cpf,
+      dateOfBirth: parsed.dateOfBirth,
+      documentNumber: parsed.documentNumber,
+      ocrConfidence: ocrResult.confidence / 100, // normalize to 0-1
     };
 
     await prisma.verification.update({
@@ -149,13 +157,15 @@ router.post("/document", upload.single("document"), async (req, res) => {
       data: {
         documentResult: {
           documentType,
-          ...mockData,
+          ...ocrData,
+          ocrText: ocrResult.text,
+          orientationDegrees: ocrResult.orientationDegrees,
           imagePath: req.file.path,
         },
       },
     });
 
-    res.json(mockData);
+    res.json(ocrData);
   } catch (err) {
     console.error("[verify/document]", err);
     res.status(500).json({ error: "Document processing failed" });
