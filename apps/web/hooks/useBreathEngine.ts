@@ -31,25 +31,38 @@ function variance(arr: number[]): number {
 }
 
 /**
- * Checks whether a phase had real breathing based on volume statistics.
- * Requires: high average volume, a clear peak, AND volume variation
- * (breathing has peaks/valleys — ambient noise is flat).
+ * Checks whether a phase had real breathing using noise-subtracted analysis.
+ * Subtracts the calibrated noise floor so ambient noise becomes ~0.
+ * Mouth-only motion adds zero audio → all net values ≈ 0 → always fails.
  */
 function isPhaseValid(volumes: number[], noiseFloor: number): boolean {
   if (volumes.length < 20) return false;
 
-  const avg = volumes.reduce((a, b) => a + b, 0) / volumes.length;
-  const peak = Math.max(...volumes);
-  const stdDev = Math.sqrt(
-    volumes.reduce((s, v) => s + (v - avg) ** 2, 0) / volumes.length
+  // 1. Subtract noise floor — only count signal ABOVE ambient
+  const nf = Math.max(noiseFloor, 0.03); // minimum floor even in silent rooms
+  const netVolumes = volumes.map(v => Math.max(0, v - nf));
+
+  const netAvg = netVolumes.reduce((a, b) => a + b, 0) / netVolumes.length;
+  const netPeak = Math.max(...netVolumes);
+  const netStdDev = Math.sqrt(
+    netVolumes.reduce((s, v) => s + (v - netAvg) ** 2, 0) / netVolumes.length
   );
 
-  // Adaptive thresholds — scale with noise floor but enforce hard minimums
-  const minAvg = Math.max(0.18, noiseFloor * 2.0);
-  const minPeak = Math.max(0.35, noiseFloor * 3.0);
-  const minStdDev = 0.04; // breathing has volume variation; ambient is flat
+  // Net thresholds: signal above ambient must be substantial
+  if (netAvg < 0.10) return false;   // sustained sound above noise
+  if (netPeak < 0.20) return false;  // clear peak above noise
+  if (netStdDev < 0.03) return false; // variation (not flat hum)
 
-  return avg > minAvg && peak > minPeak && stdDev > minStdDev;
+  // 2. Frame coverage: ≥40% of frames must be clearly above noise floor
+  const clearThreshold = nf * 1.8;
+  const framesAbove = volumes.filter(v => v > clearThreshold).length;
+  if (framesAbove / volumes.length < 0.40) return false;
+
+  // 3. Raw volume hard floor — absolute minimum regardless of noise floor
+  const rawAvg = volumes.reduce((a, b) => a + b, 0) / volumes.length;
+  if (rawAvg < 0.15) return false;
+
+  return true;
 }
 
 export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | null>) {
@@ -94,10 +107,18 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     try {
       const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
       const source = audioCtx.createMediaStreamSource(stream);
+
+      // High-pass filter removes mic self-noise, AGC artifacts, and low-freq hum
+      const highpass = audioCtx.createBiquadFilter();
+      highpass.type = "highpass";
+      highpass.frequency.value = 85;
+      highpass.Q.value = 0.7;
+
       const analyser = audioCtx.createAnalyser();
       analyser.fftSize = 512;
       analyser.smoothingTimeConstant = 0.35;
-      source.connect(analyser);
+      source.connect(highpass);
+      highpass.connect(analyser);
 
       audioContextRef.current = audioCtx;
       analyserRef.current = analyser;
@@ -120,7 +141,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       sum += amplitude * amplitude;
     }
     const rms = Math.sqrt(sum / data.length);
-    return Math.min(rms * 12, 1);
+    return Math.min(rms * 8, 1);
   }, []);
 
   const calculateSync = useCallback((results: FaceLandmarkerResult) => {
@@ -201,9 +222,9 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     // Noise floor calibration during idle phase
     if (phaseRef.current === "idle" && !noiseFloorCalibratedRef.current) {
       noiseFloorSamplesRef.current.push(currentVolume);
-      if (noiseFloorSamplesRef.current.length >= 40) {
+      if (noiseFloorSamplesRef.current.length >= 60) {
         const sorted = [...noiseFloorSamplesRef.current].sort((a, b) => a - b);
-        noiseFloorRef.current = sorted[Math.floor(sorted.length * 0.9)]!;
+        noiseFloorRef.current = sorted[Math.floor(sorted.length * 0.95)]!;
         noiseFloorCalibratedRef.current = true;
       }
     }
