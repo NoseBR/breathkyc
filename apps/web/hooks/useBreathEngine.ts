@@ -22,6 +22,8 @@ export interface BreathStats {
   breathingDetected: boolean;
   /** Raw microphone RMS energy (0–1). Silent ≈ 0.001, breathing ≈ 0.01–0.1 */
   audioRms: number;
+  /** Countdown seconds remaining in current phase (5→1), 0 when idle */
+  phaseCountdown: number;
 }
 
 /**
@@ -63,6 +65,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     phaseProgress: 0,
     breathingDetected: false,
     audioRms: 0,
+    phaseCountdown: 0,
   });
 
   const [mouthLandmarks, setMouthLandmarks] = useState<{ x: number; y: number }[]>([]);
@@ -172,8 +175,8 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     setIsBreathing(normAperture > 0.042 && isBreathDetected);
 
     // --- Guided breath phase tracking ---
-    const INHALE_MS = 3500;
-    const EXHALE_MS = 3500;
+    const INHALE_MS = 5000;
+    const EXHALE_MS = 5000;
     const PAUSE_MS = 2000;
 
     const now = performance.now();
@@ -220,7 +223,8 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
         const inhaleRatio = inhaleValues.length > 0 ? inhaleAbove / inhaleValues.length : 0;
         const exhaleRatio = exhaleValues.length > 0 ? exhaleAbove / exhaleValues.length : 0;
 
-        const inhaleOk = inhaleRatio >= 0.25;
+        // Inhale is naturally quieter than exhale — lower bar for inhale
+        const inhaleOk = inhaleRatio >= 0.15;
         const exhaleOk = exhaleRatio >= 0.25;
 
         if (inhaleOk && exhaleOk) {
@@ -243,9 +247,16 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
 
     const pe = now - phaseStartMsRef.current;
     let phaseProgress = 0;
-    if (phaseRef.current === "idle") phaseProgress = Math.min(1, pe / PAUSE_MS);
-    else if (phaseRef.current === "inhale") phaseProgress = Math.min(1, pe / INHALE_MS);
-    else phaseProgress = Math.min(1, pe / EXHALE_MS);
+    let phaseCountdown = 0;
+    if (phaseRef.current === "idle") {
+      phaseProgress = Math.min(1, pe / PAUSE_MS);
+    } else if (phaseRef.current === "inhale") {
+      phaseProgress = Math.min(1, pe / INHALE_MS);
+      phaseCountdown = Math.max(1, Math.ceil((INHALE_MS - pe) / 1000));
+    } else {
+      phaseProgress = Math.min(1, pe / EXHALE_MS);
+      phaseCountdown = Math.max(1, Math.ceil((EXHALE_MS - pe) / 1000));
+    }
 
     // Use PEAK scores (accumulated over exercise) for the stats that get sent to API
     setCurrentStats({
@@ -260,6 +271,7 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
       phaseProgress,
       breathingDetected: isBreathDetected,
       audioRms: rms,
+      phaseCountdown,
     });
   }, []);
 

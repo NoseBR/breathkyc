@@ -202,12 +202,22 @@ export default function BreathStep({ sessionId, onSuccess, onFail }: BreathStepP
           ) : currentStats.breathPhase === "inhale" ? (
             <div className="text-center mb-4">
               <h2 className="text-3xl font-black text-cyan-400">BREATHE IN</h2>
-              <p className="text-cyan-400/50 text-sm mt-1">Inhale deeply through your nose or mouth</p>
+              <div className="flex items-center justify-center gap-2 mt-1">
+                <span className="text-4xl font-black text-cyan-400/80 tabular-nums">
+                  {currentStats.phaseCountdown}
+                </span>
+                <p className="text-cyan-400/50 text-sm">Inhale deeply</p>
+              </div>
             </div>
           ) : (
             <div className="text-center mb-4">
               <h2 className="text-3xl font-black text-green-400">BREATHE OUT</h2>
-              <p className="text-green-400/50 text-sm mt-1">Exhale slowly — let the mic hear you</p>
+              <div className="flex items-center justify-center gap-2 mt-1">
+                <span className="text-4xl font-black text-green-400/80 tabular-nums">
+                  {currentStats.phaseCountdown}
+                </span>
+                <p className="text-green-400/50 text-sm">Exhale slowly</p>
+              </div>
             </div>
           )}
 
