@@ -105,18 +105,28 @@ export default function BreathStep({ sessionId, onSuccess, onFail }: BreathStepP
       }
 
       const res = await apiPostForm("/v1/verify/breath", formData);
-      const data = await res.json();
+
+      let data: Record<string, unknown>;
+      try {
+        data = await res.json();
+      } catch {
+        setStatus("result");
+        setErrorMSG(`Server returned status ${res.status}. Please try again.`);
+        return;
+      }
 
       if (data.error || !data.passed) {
         setStatus("result");
-        setErrorMSG(data.error || "Breath synchronization failed. Audio didn't match mouth physics.");
+        const errMsg = typeof data.error === 'string' ? data.error : "Breath synchronization failed. Audio didn't match mouth physics.";
+        setErrorMSG(errMsg);
       } else {
         setStatus("result");
         setTimeout(() => onSuccess(), 3000);
       }
     } catch (e) {
+      console.error("[BreathStep] API error:", e);
       setStatus("result");
-      setErrorMSG("Network transmission error.");
+      setErrorMSG("Network transmission error. Check your connection and try again.");
     }
   };
 

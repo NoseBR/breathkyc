@@ -182,8 +182,8 @@ export function useBreathEngine(videoRef: React.RefObject<HTMLVideoElement | nul
     setIsBreathing(normAperture > 0.042 && isBreathDetected);
 
     // --- Guided breath phase tracking ---
-    const INHALE_MS = 5000;
-    const EXHALE_MS = 5000;
+    const INHALE_MS = 3000;
+    const EXHALE_MS = 3000;
     const PAUSE_MS = 2000;
 
     const now = performance.now();
