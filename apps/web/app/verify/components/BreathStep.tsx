@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ShieldAlert, CheckCircle, Activity, Mic, Camera, Wind } from "lucide-react";
 import { useBreathEngine, BREATH_CYCLES_REQUIRED } from "../../../hooks/useBreathEngine";
-import { apiPost } from "../../../lib/api";
+import { apiPostForm } from "../../../lib/api";
 import { allowInsecureDevBypass } from "../../../lib/insecureContext";
 
 interface BreathStepProps {
@@ -68,6 +68,21 @@ export default function BreathStep({ sessionId, onSuccess, onFail }: BreathStepP
   }, [currentStats.cyclesCompleted, status]);
 
   const submitBreathPayload = async () => {
+    // Capture face snapshot from live video BEFORE stopping the engine
+    let faceBlob: Blob | null = null;
+    if (videoRef.current && videoRef.current.readyState >= 2) {
+      const snapCanvas = document.createElement("canvas");
+      snapCanvas.width = videoRef.current.videoWidth;
+      snapCanvas.height = videoRef.current.videoHeight;
+      const ctx = snapCanvas.getContext("2d");
+      if (ctx) {
+        ctx.drawImage(videoRef.current, 0, 0, snapCanvas.width, snapCanvas.height);
+        faceBlob = await new Promise<Blob | null>((resolve) =>
+          snapCanvas.toBlob((b) => resolve(b), "image/jpeg", 0.85)
+        );
+      }
+    }
+
     setStatus("processing");
     stopEngine();
 
@@ -79,12 +94,17 @@ export default function BreathStep({ sessionId, onSuccess, onFail }: BreathStepP
     const sent = Math.min(100, Math.max(0, Math.round(stats.breathScore)));
 
     try {
-      const res = await apiPost("/v1/verify/breath", {
-        sessionId,
-        syncScore: sent,
-        mouthScore: Math.round(stats.mouthBreathScore),
-        audioScore: Math.round(stats.audioBreathScore),
-      });
+      // Send scores + face snapshot for cross-step biometric verification
+      const formData = new FormData();
+      formData.append("sessionId", sessionId);
+      formData.append("syncScore", sent.toString());
+      formData.append("mouthScore", Math.round(stats.mouthBreathScore).toString());
+      formData.append("audioScore", Math.round(stats.audioBreathScore).toString());
+      if (faceBlob) {
+        formData.append("face", new File([faceBlob], "breath-face.jpg", { type: "image/jpeg" }));
+      }
+
+      const res = await apiPostForm("/v1/verify/breath", formData);
       const data = await res.json();
 
       if (data.error || !data.passed) {
