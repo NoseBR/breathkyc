@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ShieldAlert, CheckCircle, Activity, Mic, Camera, Wind } from "lucide-react";
 import { useBreathEngine, BREATH_CYCLES_REQUIRED } from "../../../hooks/useBreathEngine";
-import { apiPostForm } from "../../../lib/api";
+import { apiPost, apiPostForm } from "../../../lib/api";
 import { allowInsecureDevBypass } from "../../../lib/insecureContext";
 
 interface BreathStepProps {
