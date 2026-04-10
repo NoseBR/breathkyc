@@ -234,7 +234,7 @@ export default function FacialStep({ sessionId, onSuccess, onFail }: FacialStepP
         <>
           <h2 className="text-xl font-bold mb-1 text-white">Facial Biometrics</h2>
           <p className="text-zinc-400 text-sm mb-4 text-center">
-            {isLoaded ? "Move your head slightly and blink." : "Initializing MediaPipe Engine..."}
+            {isLoaded ? "Move your head slightly and blink." : "Initializing..."}
           </p>
 
           {errorMSG && (
