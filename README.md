@@ -59,6 +59,12 @@ This project includes advanced browser polyfills to ensure compatibility with So
 - **Buffer Polyfill**: Global `Buffer` support for Solana SDK.
 - **Process/Global Polyfills**: Standard environment variables support.
 
+## 📦 BreathProof SDK
+
+We provide a developer-friendly SDK to integrate this liveness verification into any dApp. It encapsulates the complex biometric-to-ZK-to-Solana pipeline into a few lines of code.
+
+Check the `src/sdk/README.md` for more details.
+
 ## 📝 License
 
 This project is licensed under the Apache-2.0 License.
