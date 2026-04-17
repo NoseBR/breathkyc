@@ -1,0 +1,6 @@
+{
+  "name": "BreathProof: ZK-Humanity",
+  "description": "A tri-modal biometric liveness verification layer inspired by Breath Protocol, using zkVerify for decentralized proof validation. Proves biological liveness through prompted breathing.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["biometrics", "zk-proofs"]
+}
