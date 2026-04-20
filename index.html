@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BreathProof: ZK-Humanity</title>
+    <script>
+      // Fix for "Cannot set property fetch" and other global issues in iframe environments
+      (function() {
+        try {
+          window.global = window;
+          window.process = { env: {} };
+
+          const descriptor = Object.getOwnPropertyDescriptor(window, 'fetch');
+          if (descriptor && !descriptor.set && descriptor.configurable) {
+            const originalFetch = window.fetch.bind(window);
+            Object.defineProperty(window, 'fetch', {
+              get: function() { return originalFetch; },
+              set: function(v) { console.warn('Blocked attempt to overwrite fetch'); },
+              configurable: true,
+              enumerable: true
+            });
+          } else if (descriptor && descriptor.writable) {
+            // If it's writable but not a setter yet, we can't easily turn it into one 
+            // without losing value if it's already been changed, 
+            // but we can try to protect it.
+          }
+        } catch (e) {
+          console.debug('Fetch protection active');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
