@@ -20,16 +20,19 @@ import {
   Loader2,
   CheckCircle2,
   ArrowRight,
+  User,
+  ShieldAlert,
   Fingerprint,
   Wallet,
-  ExternalLink
+  ExternalLink,
+  LogOut
 } from 'lucide-react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
 import { zkVerifyService } from './services/zkVerifyService.ts';
 import { solanaService } from './services/solanaService.ts';
 
-type AppState = 'landing' | 'calibrating' | 'scanning' | 'verifying' | 'success' | 'error';
+type AppState = 'landing' | 'calibrating' | 'scanning' | 'verifying' | 'success' | 'error' | 'authenticating';
 
 export default function App() {
   const { connected, publicKey } = useWallet();
@@ -39,6 +42,8 @@ export default function App() {
   const [attestation, setAttestation] = useState<string | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
   const [registering, setRegistering] = useState(false);
+  const [authenticatedUser, setAuthenticatedUser] = useState<{address: string, attestation: string} | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   
   // Simulated breathing loop
@@ -71,17 +76,61 @@ export default function App() {
   };
 
   const handleScanComplete = async () => {
-    setState('verifying');
-    const result = await zkVerifyService.submitProof({
-      proof: "mock_zk_proof_0x...",
-      publicSignals: ["liveness_score_1.0", "timestamp_" + Date.now()],
-      protocol: 'groth16'
-    });
-    
-    if (result.success) {
-      setAttestation(result.attestationId || null);
-      setState('success');
-    } else {
+    if (state === 'scanning') {
+      setState('verifying');
+      const result = await zkVerifyService.submitProof({
+        proof: "mock_zk_proof_0x...",
+        publicSignals: ["liveness_score_1.0", "timestamp_" + Date.now()],
+        protocol: 'groth16'
+      });
+      
+      if (result.success) {
+        setAttestation(result.attestationId || null);
+        setState('success');
+      } else {
+        setState('error');
+      }
+    } else if (state === 'authenticating') {
+      // Biometric login flow
+      setState('verifying');
+      const result = await zkVerifyService.submitProof({
+        proof: "login_proof_0x...",
+        publicSignals: ["auth_intent", "timestamp_" + Date.now()],
+        protocol: 'groth16'
+      });
+
+      if (result.success && publicKey) {
+        try {
+          const auth = await solanaService.authenticate(publicKey.toString());
+          setAuthenticatedUser({ address: auth.user, attestation: auth.attestation || '' });
+          setState('landing');
+        } catch (err) {
+          setErrorMsg(err instanceof Error ? err.message : 'Auth failed');
+          setState('error');
+        }
+      } else {
+        setState('error');
+      }
+    }
+  };
+
+  const startLoginChallenge = async () => {
+    if (!connected) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { facingMode: 'user' }, 
+        audio: true 
+      });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+      setState('calibrating');
+      setTimeout(() => {
+        setState('authenticating');
+        setProgress(0);
+      }, 2000);
+    } catch (err) {
+      console.error(err);
       setState('error');
     }
   };
@@ -100,7 +149,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (state === 'scanning') {
+    if (state === 'scanning' || state === 'authenticating') {
       const timer = setInterval(() => {
         setProgress(prev => {
           if (prev >= 100) {
@@ -134,62 +183,111 @@ export default function App() {
             exit={{ opacity: 0, y: -20 }}
             className="max-w-xl text-center"
           >
-            <div className="flex justify-center mb-6">
-              <div className="p-4 hardware-card bg-red-500/10 border-red-500/20">
-                <Wind className="w-12 h-12 text-red-500" />
-              </div>
-            </div>
-            <h1 className="text-4xl sm:text-6xl font-sans font-bold tracking-tight mb-4">
-              Biological Liveness
-            </h1>
-            <p className="text-secondary text-lg mb-8 leading-relaxed">
-              Verify your humanity via <span className="text-primary font-medium">zkVerify</span> and register it on the <span className="text-primary font-medium">Solana</span> blockchain. 
-              The most secure way to prove you are not a bot.
-            </p>
-            
-            <div className="flex flex-col items-center gap-4">
-              {connected ? (
-                <div className="space-y-6 flex flex-col items-center">
-                  <div className="px-4 py-2 hardware-card border-emerald-500/30 bg-emerald-500/5 text-emerald-500 mono-display text-[10px] flex items-center gap-2">
-                    <CheckCircle2 className="w-3 h-3" />
-                    WALLET ACTIVE: {publicKey?.toString().slice(0, 6)}...{publicKey?.toString().slice(-6)}
+            {authenticatedUser ? (
+              <div className="space-y-8">
+                <div className="flex justify-center mb-6">
+                  <div className="p-6 hardware-card border-emerald-500/30 bg-emerald-500/5 relative">
+                    <div className="absolute -top-3 -right-3 w-8 h-8 rounded-full bg-emerald-500 flex items-center justify-center border-4 border-[#0c0d0e]">
+                      <CheckCircle2 className="w-4 h-4 text-black" />
+                    </div>
+                    <User className="w-16 h-16 text-emerald-500" />
                   </div>
-                  <button 
-                    onClick={startScan}
-                    className="group relative flex items-center gap-3 px-8 py-4 hardware-card bg-red-600 hover:bg-red-500 transition-all duration-300 overflow-hidden mx-auto"
-                  >
-                    <span className="font-mono font-bold uppercase tracking-widest text-sm text-white">Start Liveness Check</span>
-                    <ArrowRight className="w-4 h-4 text-white group-hover:translate-x-1 transition-transform" />
-                  </button>
                 </div>
-              ) : (
-                <div className="flex flex-col items-center gap-6">
-                  <div className="p-6 hardware-card border-dashed border-white/20 bg-white/5 max-w-sm">
-                    <Wallet className="w-8 h-8 text-secondary mx-auto mb-3" />
-                    <p className="status-label text-center mb-0">Solana wallet connection required</p>
-                    <p className="text-[9px] text-secondary/60 mt-2 text-center uppercase tracking-tighter">
-                      Tip: If using MetaMask, ensure the Solana Snap is installed or use a native Solana wallet like Phantom.
-                    </p>
-                  </div>
-                  <WalletMultiButton className="!bg-red-600 hover:!bg-red-500 !transition-all !duration-300 !rounded-none !h-14 !px-10 !font-mono !text-xs !uppercase !tracking-widest" />
+                <div>
+                  <h1 className="text-3xl font-bold mb-2">Welcome Back</h1>
+                  <p className="status-label text-emerald-500">Authenticated Biometric Profile</p>
                 </div>
-              )}
-            </div>
 
-            <div className="mt-12 flex justify-center gap-8 opacity-50 grayscale hover:grayscale-0 transition-all duration-500">
-              <div className="flex flex-col items-center gap-1">
-                <ShieldCheck className="w-6 h-6" />
-                <span className="status-label">zkVerify Enabled</span>
+                <div className="grid grid-cols-1 gap-4 text-left">
+                  <div className="p-4 hardware-card bg-white/5 border-white/10">
+                    <span className="status-label text-[10px]">Registry ID</span>
+                    <p className="mono-display text-xs mt-1 text-white truncate">{authenticatedUser.address}</p>
+                  </div>
+                  <div className="p-4 hardware-card bg-white/5 border-white/10">
+                    <span className="status-label text-[10px]">Proof Reference</span>
+                    <p className="mono-display text-xs mt-1 text-secondary truncate">{authenticatedUser.attestation}</p>
+                  </div>
+                </div>
+
+                <button 
+                  onClick={() => setAuthenticatedUser(null)}
+                  className="flex items-center gap-2 px-6 py-2 mx-auto text-secondary hover:text-white transition-colors font-mono text-[10px] uppercase tracking-widest border border-white/5 rounded-full"
+                >
+                  <LogOut className="w-3 h-3" />
+                  Logout Session
+                </button>
               </div>
-              <div className="flex flex-col items-center gap-1">
-                <Activity className="w-6 h-6" />
-                <span className="status-label">On-Chain Registry</span>
-              </div>
-            </div>
+            ) : (
+              <>
+                <div className="flex justify-center mb-6">
+                  <div className="p-4 hardware-card bg-red-500/10 border-red-500/20">
+                    <Wind className="w-12 h-12 text-red-500" />
+                  </div>
+                </div>
+                <h1 className="text-4xl sm:text-6xl font-sans font-bold tracking-tight mb-4">
+                  Biological Liveness
+                </h1>
+                <p className="text-secondary text-lg mb-8 leading-relaxed">
+                  Verify your humanity via <span className="text-primary font-medium">zkVerify</span> and register it on the <span className="text-primary font-medium">Solana</span> blockchain. 
+                  The most secure way to prove you are not a bot.
+                </p>
+                
+                <div className="flex flex-col items-center gap-4">
+                  {connected ? (
+                    <div className="space-y-6 flex flex-col items-center">
+                      <div className="px-4 py-2 hardware-card border-emerald-500/30 bg-emerald-500/5 text-emerald-500 mono-display text-[10px] flex items-center gap-2">
+                        <CheckCircle2 className="w-3 h-3" />
+                        WALLET ACTIVE: {publicKey?.toString().slice(0, 6)}...{publicKey?.toString().slice(-6)}
+                      </div>
+                      
+                      <div className="flex flex-col sm:flex-row gap-4 w-full">
+                        <button 
+                          onClick={startScan}
+                          className="group relative flex flex-1 items-center justify-center gap-3 px-8 py-4 hardware-card bg-red-600 hover:bg-red-500 transition-all duration-300"
+                        >
+                          <span className="font-mono font-bold uppercase tracking-widest text-xs text-white">Enroll Profile</span>
+                          <ArrowRight className="w-4 h-4 text-white group-hover:translate-x-1 transition-transform" />
+                        </button>
+                        
+                        <button 
+                          onClick={startLoginChallenge}
+                          className="group relative flex flex-1 items-center justify-center gap-3 px-8 py-4 hardware-card bg-white/5 border-white/20 hover:bg-white/10 transition-all duration-300"
+                        >
+                          <Fingerprint className="w-4 h-4 text-secondary" />
+                          <span className="font-mono font-bold uppercase tracking-widest text-xs text-white">Biometric Login</span>
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center gap-6">
+                      <div className="p-6 hardware-card border-dashed border-white/20 bg-white/5 max-w-sm">
+                        <Wallet className="w-8 h-8 text-secondary mx-auto mb-3" />
+                        <p className="status-label text-center mb-0">Solana wallet connection required</p>
+                        <p className="text-[9px] text-secondary/60 mt-2 text-center uppercase tracking-tighter">
+                          Tip: If using MetaMask, ensure the Solana Snap is installed or use a native Solana wallet like Phantom.
+                        </p>
+                      </div>
+                      <WalletMultiButton className="!bg-red-600 hover:!bg-red-500 !transition-all !duration-300 !rounded-none !h-14 !px-10 !font-mono !text-xs !uppercase !tracking-widest" />
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-12 flex justify-center gap-8 opacity-50 grayscale hover:grayscale-0 transition-all duration-500">
+                  <div className="flex flex-col items-center gap-1">
+                    <ShieldCheck className="w-6 h-6" />
+                    <span className="status-label">zkVerify Enabled</span>
+                  </div>
+                  <div className="flex flex-col items-center gap-1">
+                    <Activity className="w-6 h-6" />
+                    <span className="status-label">On-Chain Registry</span>
+                  </div>
+                </div>
+              </>
+            )}
           </motion.div>
         )}
 
-        {(state === 'calibrating' || state === 'scanning' || state === 'verifying') && (
+        {(state === 'calibrating' || state === 'scanning' || state === 'verifying' || state === 'authenticating') && (
           <motion.div 
             key="interface"
             initial={{ opacity: 0, scale: 0.95 }}
@@ -253,6 +351,29 @@ export default function App() {
                   >
                     <Loader2 className="w-12 h-12 text-red-500 animate-spin mb-4" />
                     <h3 className="mono-display text-sm tracking-widest uppercase">zkVerify Process</h3>
+                  </motion.div>
+                )}
+                {state === 'authenticating' && (
+                  <motion.div 
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    className="absolute inset-0 flex flex-col items-center justify-center bg-emerald-950/20 backdrop-blur-[2px]"
+                  >
+                     <div className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1 bg-emerald-500 text-black rounded-full shadow-[0_0_15px_rgba(16,185,129,0.5)]">
+                        <Fingerprint className="w-3 h-3" />
+                        <span className="mono-display text-[9px] font-bold uppercase tracking-wider">Authentication Mode</span>
+                     </div>
+                    <motion.div 
+                      animate={{ 
+                        scale: inhaling ? [1.1, 1.2, 1.2, 1.1] : [1.1, 0.95, 0.95, 1.1],
+                        opacity: inhaling ? 1 : 0.8
+                      }}
+                      transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
+                      className="w-32 h-32 rounded-full border-2 border-emerald-500/50 flex items-center justify-center bg-emerald-500/10"
+                    >
+                      <Activity className="w-8 h-8 text-emerald-500" />
+                    </motion.div>
+                    <p className="mt-4 mono-display text-[10px] text-emerald-500 uppercase tracking-[0.2em] animate-pulse">Scanning Bio-Signature</p>
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -360,16 +481,19 @@ export default function App() {
             animate={{ opacity: 1, scale: 1 }}
             className="max-w-md w-full hardware-card p-12 text-center border-red-500/50"
           >
-            <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-6" />
-            <h2 className="text-2xl font-bold mb-2">Scan Aborted</h2>
+            <ShieldAlert className="w-16 h-16 text-red-500 mx-auto mb-6" />
+            <h2 className="text-2xl font-bold mb-2">{errorMsg ? 'Auth Failed' : 'Scan Aborted'}</h2>
             <p className="text-secondary mb-8 text-sm">
-              Verification criteria not met. Ensure you are in a quiet, well-lit environment and follow the breathing prompts closely.
+              {errorMsg || 'Verification criteria not met. Ensure you are in a quiet, well-lit environment and follow the breathing prompts closely.'}
             </p>
             <button 
-              onClick={() => setState('landing')}
+              onClick={() => {
+                setState('landing');
+                setErrorMsg(null);
+              }}
               className="w-full px-6 py-3 hardware-card bg-red-600 hover:bg-red-500 transition-all font-mono text-xs uppercase tracking-widest font-bold"
             >
-              Retry Session
+              Back to Home
             </button>
           </motion.div>
         )}

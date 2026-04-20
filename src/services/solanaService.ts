@@ -41,10 +41,28 @@ export const solanaService = {
     console.log(`Fetching PDA state for: ${userWallet}`);
     
     // Simulate finding the PDA and fetching account data
+    // In a real app, this would query the Solana blockchain
+    const isVerified = Math.random() > 0.3; // Simulate that some wallets are already verified
+    
     return {
-      isVerified: true,
-      lastVerified: new Date().toISOString(),
-      attestationId: 'zkv-att-123456789'
+      isVerified,
+      lastVerified: isVerified ? new Date().toISOString() : null,
+      attestationId: isVerified ? 'zkv-att-' + Math.random().toString(36).substring(7) : null
+    };
+  },
+
+  /**
+   * Authenticates a user by checking their biometric status
+   */
+  async authenticate(userWallet: string) {
+    const status = await this.checkVerificationStatus(userWallet);
+    if (!status.isVerified) {
+      throw new Error('Biometric record not found. Please register first.');
+    }
+    return {
+      authenticated: true,
+      user: userWallet,
+      attestation: status.attestationId
     };
   }
 };
